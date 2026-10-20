@@ -173,8 +173,8 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
     aspect = 9 / 16 if request.aspect_ratio == '9:16' else 16 / 9
     project = {'version': 1, 'revision': 0, 'title': utf16_prefix(download.metadata.title or '', 1024), 'width': w, 'height': h,
         'duration_ms': duration, 'aspect_ratio': request.aspect_ratio, 'candidates': [],
-        'transcript': [{'start_ms': max(0, min(duration, s.start_time_ms)), 'end_ms': max(0, min(duration, s.end_time_ms)),
-                        'text': utf16_prefix(s.text, 20000)} for s in transcript]}
+        'transcript': [transcript_row(s.start_time_ms, s.end_time_ms, s.text, [(w.start_time_ms, w.end_time_ms) for w in s.words], duration)
+                       for s in transcript]}
     loop = asyncio.get_running_loop()
     from .run_diagnostics import CURRENT
     diagnostics = CURRENT.get()
@@ -350,6 +350,16 @@ def _shot_scene(shot, w, h, aspect, layout_style):
     return 'fill', [_centered_crop(w, h, aspect, people[0] if people else _box(shot.get('content_box')) if isinstance(shot, dict) else None)]
 
 
+def transcript_row(start, end, text, words, duration):
+    """An editor transcript line. Word times ride along when they match the
+    line's words one to one, so the editor's live captions use real timing."""
+    row = {'start_ms': max(0, min(duration, round(start))), 'end_ms': max(0, min(duration, round(end))), 'text': utf16_prefix(text, 20000)}
+    if (words and len(words) == len(text.split()) and len(words) <= 2000
+            and all(_finite(a, 0) and _finite(b, a) for a, b in words)):
+        row['words'] = [[max(0, min(duration, round(a))), max(0, min(duration, round(b)))] for a, b in words]
+    return row
+
+
 def automatic_candidates(output, plan, width, height, duration_ms):
     """Editable candidates for every clip an Automatic run rendered.
 
@@ -467,8 +477,8 @@ async def create_project(run, progress=None):
         rows = read_json(run, 'transcript.json').get('segments') or []
         for row in rows[:100000]:
             if isinstance(row, dict) and _finite(row.get('start_time_ms'), 0) and _finite(row.get('end_time_ms'), 0):
-                transcript.append({'start_ms': max(0, min(duration, round(row['start_time_ms']))),
-                    'end_ms': max(0, min(duration, round(row['end_time_ms']))), 'text': utf16_prefix(str(row.get('text') or ''), 20000)})
+                words = [(w.get('start_time_ms'), w.get('end_time_ms')) for w in row.get('words') or [] if isinstance(w, dict)]
+                transcript.append(transcript_row(row['start_time_ms'], row['end_time_ms'], str(row.get('text') or ''), words, duration))
     except (ValueError, OSError, AttributeError):
         transcript = []
     preview = run / media_name('preview')
@@ -581,33 +591,66 @@ def validate_candidate(c, duration, transcript_count=100000):
             raise ValueError('Invalid caption edit')
         if any(ord(char) < 32 and char not in '\t\n\r' for char in text):
             raise ValueError('Invalid caption text')
+        if ('start_ms' in edit) != ('end_ms' in edit) or ('start_ms' in edit and (
+                not number(edit['start_ms'], 0, duration) or not number(edit['end_ms'], edit['start_ms'] + 100, duration))):
+            raise ValueError('Invalid caption timing')
         seen.add(index)
+    inserts = c.get('caption_inserts', [])
+    if not isinstance(inserts, list) or len(inserts) > 200:
+        raise ValueError('Invalid added captions')
+    for item in inserts:
+        if (not isinstance(item, dict) or not isinstance(item.get('text'), str) or not 0 < len(item['text']) <= 500
+                or any(ord(char) < 32 and char not in '\t\n\r' for char in item['text'])
+                or not number(item.get('start_ms'), 0, duration) or not number(item.get('end_ms'), item['start_ms'] + 100, duration)):
+            raise ValueError('Invalid added caption')
+    from clip_engine.config import validate_caption_overrides
+    validate_caption_overrides(c.get('caption_style'))
 
 
-def caption_transcript(transcript, edits):
+def _spread(tokens, start, end):
+    span = max(1, end - start)
+    return [TranscriptWord(word, round(start + i * span / len(tokens)), round(start + (i + 1) * span / len(tokens))) for i, word in enumerate(tokens)]
+
+
+def caption_transcript(transcript, edits, inserts=()):
     """A per-clip copy for rendering; original evidence and word timing stay intact.
 
     Corrections with the same word count retain the original word timestamps.
     Added/removed words are spread over the original line's spoken interval.
+    A retimed line moves its words proportionally into the new interval, and
+    added lines spread their words evenly over their own interval.
     """
-    overrides = {edit['segment']: edit['text'] for edit in edits}
+    overrides = {edit['segment']: edit for edit in edits}
     result = []
     for index, segment in enumerate(transcript):
-        if index not in overrides:
+        edit = overrides.get(index)
+        if edit is None:
             result.append(replace(segment, words=[replace(w) for w in segment.words]))
             continue
-        text = ' '.join(overrides[index].split())
+        text = ' '.join(edit['text'].split())
         tokens = text.split()
         if not tokens:
             continue  # An empty correction hides this caption without cutting audio.
+        start = segment.words[0].start_time_ms if segment.words else segment.start_time_ms
+        end = segment.words[-1].end_time_ms if segment.words else segment.end_time_ms
         if segment.words and len(tokens) == len(segment.words):
             words = [replace(word, word=text) for word, text in zip(segment.words, tokens)]
         else:
-            start = segment.words[0].start_time_ms if segment.words else segment.start_time_ms
-            end = segment.words[-1].end_time_ms if segment.words else segment.end_time_ms
-            span = max(1, end - start)
-            words = [TranscriptWord(word, round(start + i * span / len(tokens)), round(start + (i + 1) * span / len(tokens))) for i, word in enumerate(tokens)]
-        result.append(replace(segment, text=text, words=words))
+            words = _spread(tokens, start, end)
+        if 'start_ms' in edit:
+            new_start, new_end = round(edit['start_ms']), round(edit['end_ms'])
+            scale = (new_end - new_start) / max(1, end - start)
+            at = lambda t: max(new_start, min(new_end, round(new_start + (t - start) * scale)))
+            words = [replace(w, start_time_ms=at(w.start_time_ms), end_time_ms=max(at(w.start_time_ms) + 1, at(w.end_time_ms))) for w in words]
+            result.append(replace(segment, text=text, words=words, start_time_ms=new_start, end_time_ms=new_end))
+        else:
+            result.append(replace(segment, text=text, words=words))
+    for item in inserts or ():
+        tokens = ' '.join(item['text'].split()).split()
+        if tokens:
+            a, b = round(item['start_ms']), round(item['end_ms'])
+            result.append(TranscriptSegment(a, b, ' '.join(tokens), words=_spread(tokens, a, b)))
+    result.sort(key=lambda s: s.start_time_ms)
     return result
 
 
@@ -718,6 +761,9 @@ async def run_editor(config, progress=None):
             return {**item, 'start_time_ms': round(item['start_time_ms']), 'end_time_ms': round(item['end_time_ms'])}
         transcript = [TranscriptSegment(**{**timing(s), 'words': [TranscriptWord(**timing(w)) for w in s.get('words', [])]}) for s in rows]
     action = config['action']
+    if action == 'preview-frame':
+        await preview_frame(run, project, c, source, transcript, config.get('at_ms'), config.get('frame_id'))
+        return  # A preview never changes the project.
     if action == 'review':
         with failure_code('review_unavailable'):
             reviewer = CoherenceReviewer(JevService.from_settings(settings, required=True), settings, transcript, project['duration_ms'])
@@ -752,8 +798,8 @@ async def run_editor(config, progress=None):
 
 async def export_clip(run, project, c, output, source, transcript):
     """Render one ready candidate and append it to the library's job output."""
-    from clip_engine.config import get_caption_preset
-    render_transcript = caption_transcript(transcript, c.get('caption_edits', []))
+    from clip_engine.config import caption_style_for
+    render_transcript = caption_transcript(transcript, c.get('caption_edits', []), c.get('caption_inserts', []))
     next_index = output.get('next_clip_index', 0)
     if type(next_index) is not int or not 0 <= next_index <= 1000:
         raise EditorError('invalid_edit', 'Invalid export sequence')
@@ -772,7 +818,7 @@ async def export_clip(run, project, c, output, source, transcript):
     with tempfile.TemporaryDirectory(prefix='.editor-export-', dir=run) as work, failure_code('render_failed'):
         result = await renderer.render_clip(RenderRequest(video_path=source, output_path=str(Path(work) / 'clip.mp4'),
             start_time_ms=a, end_time_ms=b, source_width=project['width'], source_height=project['height'],
-            transcript_segments=render_transcript, include_captions=c['captions'], caption_style=get_caption_preset(c['caption_preset']),
+            transcript_segments=render_transcript, include_captions=c['captions'], caption_style=caption_style_for(c['caption_preset'], c.get('caption_style')),
             title_text=c['title'], include_title=c.get('title_card') is True,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
             caption_y=c.get('caption_y'),
@@ -787,3 +833,84 @@ async def export_clip(run, project, c, output, source, transcript):
     output['total_clips'] = len(output['clips'])
     atomic_json(run / 'job_output.json', output)
     return index
+
+
+PREVIEW_BEFORE_MS, PREVIEW_AFTER_MS = 1200, 300
+
+
+def preview_ranges(c, render_transcript, style, at_ms):
+    """The cuts to render so the frame at `at_ms` matches the full export.
+
+    Captions are grouped from the start of the clip, so the window starts at
+    the first word of the caption group on screen at `at_ms` (in the export's
+    own grouping, across cuts) and ends after that group's last word, which
+    keeps unspoken words, the group's layout and its animation identical.
+    """
+    from clip_engine.services.clip_editor import TimeMap, remap_segments
+    from clip_engine.services.caption_generator import CaptionGeneratorService
+    ranges = c['ranges']
+    origin = ranges[0][0]
+    start, end = at_ms - PREVIEW_BEFORE_MS, at_ms + PREVIEW_AFTER_MS
+    if c['captions'] and style.word_by_word_highlight:
+        keeps = [(a - origin, b - origin) for a, b in ranges]
+        time_map = TimeMap(keeps, ranges[-1][1] - origin)
+        words = [w for seg in remap_segments(render_transcript, origin, time_map) for w in seg.words]
+        words = [w for w in words if w.end_time_ms > origin and w.start_time_ms < origin + time_map.output_ms]
+        groups = CaptionGeneratorService()._group_words(words, style.max_words_per_line)
+        now = time_map.to_output(at_ms - origin)
+        group = next((g for g in reversed(groups) if now is not None and g.words[0].start_time_ms - origin <= now), None)
+
+        def source(output_ms):
+            for (a, b), (ka, kb) in zip(ranges, keeps):
+                offset = time_map.to_output(ka)
+                if offset is not None and output_ms <= offset + (kb - ka):
+                    return a + max(0, output_ms - offset)
+            return ranges[-1][1]
+        if group is not None:
+            start = min(start, source(group.words[0].start_time_ms - origin) - 50)
+            end = max(end, source(group.words[-1].end_time_ms - origin) + 50)
+    window = [[max(a, round(start)), min(b, round(end))] for a, b in ranges if b > start and a < end]
+    window = [r for r in window if r[1] - r[0] >= 100 or r[0] <= at_ms < r[1]]
+    piece = next((r for r in window if r[0] <= at_ms < r[1]), None)
+    if piece is not None and piece[1] - piece[0] < 100:
+        piece[1] = min(next(b for a, b in ranges if a <= at_ms < b), piece[0] + 100)
+        piece[0] = min(piece[0], piece[1] - 100)
+    return window
+
+
+async def preview_frame(run, project, c, source, transcript, at_ms, frame_id):
+    """Render the export's exact picture at source time `at_ms` to editor-frame-<id>.png.
+
+    Renders only the part of the clip that decides that picture, through the
+    same manual export as "Export clip" (layouts, captions, title card), then
+    keeps the frame at that time. Nothing in the project or library changes.
+    """
+    if not isinstance(frame_id, str) or not re.fullmatch(r'[a-f0-9]{32}', frame_id):
+        raise ValueError('Invalid preview id')
+    if type(at_ms) not in (int, float) or not math.isfinite(at_ms):
+        raise EditorError('invalid_edit', 'Invalid preview time')
+    if not any(a <= at_ms < b for a, b in c['ranges']):
+        raise EditorError('invalid_edit', 'Move the playhead inside the clip to preview it')
+    from clip_engine.config import caption_style_for
+    style = caption_style_for(c['caption_preset'], c.get('caption_style'))
+    render_transcript = caption_transcript(transcript, c.get('caption_edits', []), c.get('caption_inserts', []))
+    window_ranges = preview_ranges(c, render_transcript, style, at_ms)
+    a, b = window_ranges[0][0], window_ranges[-1][1]
+    window = {**c, 'ranges': window_ranges}
+    with failure_code('engine_unavailable'):
+        renderer = RenderingService()
+    target = run / f'editor-frame-{frame_id}.png'
+    with tempfile.TemporaryDirectory(prefix='.editor-preview-', dir=run) as work, failure_code('render_failed'):
+        result = await renderer.render_clip(RenderRequest(video_path=source, output_path=str(Path(work) / 'window.mp4'),
+            start_time_ms=a, end_time_ms=b, source_width=project['width'], source_height=project['height'],
+            transcript_segments=render_transcript, include_captions=c['captions'], caption_style=style,
+            caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
+            caption_y=c.get('caption_y'), title_text=c['title'], include_title=c.get('title_card') is True,
+            apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
+            manual_ranges_ms=[tuple(r) for r in window_ranges], manual_plan=manual_plan(project, window)))
+        before = sum(min(r[1], at_ms) - r[0] for r in window_ranges if r[0] < at_ms)
+        offset = max(0, before / c['video_speed'] / 1000)
+        partial = Path(work) / 'frame.png'
+        await asyncio.to_thread(run_media, ['ffmpeg', '-v', 'error', '-y', '-ss', f'{offset:.3f}', '-i', result.output_path,
+            '-frames:v', '1', '-vf', 'scale=-2:960', str(partial)], timeout=120, check=True)
+        os.replace(partial, target)

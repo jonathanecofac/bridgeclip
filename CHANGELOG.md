@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+### Added
+
+- **Caption templates** in the editor: Viral Bold, Hormozi Style, Karaoke, Minimal Clean, Gaming and Cinematic (also in Create).
+- **Customize captions** per clip: font, size, letter spacing, caps, words on screen (word by word or groups), text, spoken-word, outline and key-word colors, outline, shadow, background plate, highlight block, glow, upcoming words, pop or fade in, fade out, and horizontal and vertical position. **Save as preset** keeps a look for other clips.
+- **Edit caption timing**: change a line's start and end, drag captions on the new caption track, delete a line, or **Add** your own captions.
+- **Exact preview** renders the frame at the playhead with the export engine, so captions, fonts, title card and framing look exactly as in the exported MP4.
+- The output preview shows the real captions at the playhead in the clip's style, plus the title card; drag the captions to place them.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added

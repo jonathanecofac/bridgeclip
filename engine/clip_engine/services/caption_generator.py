@@ -220,7 +220,7 @@ class CaptionGeneratorService:
                 end = max(self._parse_ass_time(t[1]) for t in times)
                 width, height = self._block_size(words, style, output_width)
                 alignment, y = placer(start, end, width, height)
-                return [self._pin(line, alignment, output_width // 2, y) for line in events]
+                return [self._pin(line, alignment, self._block_x(style, output_width, width), y) for line in events]
 
         if has_word_timing and style.word_by_word_highlight:
             events = self._word_by_word_events(relevant_segments, clip_start_ms, clip_end_ms, style, place)
@@ -229,7 +229,7 @@ class CaptionGeneratorService:
         ass_content = header + self._events_header() + "\n".join(events)
 
         if anchors and placer is None:
-            ass_content = self._apply_anchors(ass_content, anchors, output_width)
+            ass_content = self._apply_anchors(ass_content, anchors, output_width, round(output_width * self._x(style)))
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
@@ -377,7 +377,8 @@ class CaptionGeneratorService:
                 _Token(self._display_word(w, style), PAST, self._is_emphasis(w))
                 for w in segment.text.split()
             ]
-            segment_events = self._layered_events(tokens, start_ms, end_ms, style, entrance=False)
+            segment_events = self._layered_events(tokens, start_ms, end_ms, style, entrance=False,
+                                                  fade_in_ms=style.entrance_fade_ms, fade_out_ms=style.exit_fade_ms)
             events.extend(place(segment_events, segment.text.split()) if place else segment_events)
         return events
 
@@ -386,6 +387,7 @@ class CaptionGeneratorService:
         ass_content: str,
         anchors: list[tuple[int, int, int]],
         output_width: int,
+        x: Optional[int] = None,
     ) -> str:
         r"""Prefix each Dialogue with the \an/\pos of the layout active at its start."""
         lines = []
@@ -398,9 +400,21 @@ class CaptionGeneratorService:
                     if start_ms < until_ms:
                         alignment, y = a, ay
                         break
-                line = self._pin(line, alignment, output_width // 2, y)
+                line = self._pin(line, alignment, output_width // 2 if x is None else x, y)
             lines.append(line)
         return "\n".join(lines)
+
+    @staticmethod
+    def _x(style: CaptionStyle) -> float:
+        x = getattr(style, "x_fraction", .5)
+        return x if isinstance(x, (int, float)) and .05 <= x <= .95 else .5
+
+    def _block_x(self, style: CaptionStyle, output_width: int, block_width: int) -> int:
+        """Block center for the style's horizontal position, keeping the block on screen."""
+        x, half, margin = self._x(style) * output_width, block_width / 2, 40
+        if block_width + 2 * margin >= output_width:
+            return output_width // 2
+        return round(max(half + margin, min(output_width - half - margin, x)))
 
     @staticmethod
     def _pin(line: str, alignment: int, x: int, y: int) -> str:
@@ -479,6 +493,10 @@ class CaptionGeneratorService:
         margin_v = self._calculate_margin_v(
             style, output_height, video_region_y, video_region_height,
         )
+        # Unpinned lines center between the side margins; shift that center to
+        # the style's horizontal position.
+        offset = round((2 * self._x(style) - 1) * output_width)
+        margin_l, margin_r = 60 + max(0, offset), 60 + max(0, -offset)
 
         # ASS Style format:
         # Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
@@ -490,7 +508,7 @@ class CaptionGeneratorService:
             f"{self._hex_to_ass(style.outline_color)},{self._hex_to_ass(style.shadow_color)},"
             f"{-1 if style.bold else 0},{-1 if style.italic else 0},0,0,100,100,{style.letter_spacing},0,"
             f"1,{style.outline_width},0,"
-            f"{alignment},60,60,{margin_v},1"
+            f"{alignment},{margin_l},{margin_r},{margin_v},1"
         )
 
         return f"""[Script Info]
@@ -579,9 +597,10 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
                 )
                 for k, w in enumerate(words)
             ]
-            return self._layered_events(tokens, start, end, style, entrance=style.entrance_pop)
+            return self._layered_events(tokens, start, end, style, entrance=style.entrance_pop,
+                                        fade_in_ms=style.entrance_fade_ms, fade_out_ms=style.exit_fade_ms)
 
-        events: list[str] = []
+        timed = []
         for i, current_word in enumerate(words):
             word_start = max(0, current_word.start_time_ms - clip_start_ms)
             if i < len(words) - 1:
@@ -599,12 +618,18 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
                 )
                 for j, w in enumerate(words)
             ]
+            timed.append((tokens, word_start, word_end))
+
+        # The group fades in on its first word's event and out on its last one's.
+        events: list[str] = []
+        for k, (tokens, word_start, word_end) in enumerate(timed):
             events.extend(self._layered_events(
                 tokens, word_start, word_end, style,
-                entrance=style.entrance_pop and not events,
+                entrance=style.entrance_pop and k == 0,
                 active_ms=word_end - word_start,
+                fade_in_ms=style.entrance_fade_ms if k == 0 else 0,
+                fade_out_ms=style.exit_fade_ms if k == len(timed) - 1 else 0,
             ))
-
         return events
 
     def _layered_events(
@@ -615,6 +640,8 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
         style: CaptionStyle,
         entrance: bool,
         active_ms: int = 0,
+        fade_in_ms: int = 0,
+        fade_out_ms: int = 0,
     ) -> list[str]:
         """One Dialogue line per enabled layer, all sharing the same words."""
         layers: list[tuple[int, Callable[[_Token], str]]] = []
@@ -629,6 +656,10 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
         layers.append((LAYER_FACE, lambda t: self._face_tags(t, style, active_ms)))
 
         lead = POP_TAGS if entrance else ""
+        span = max(0, end_ms - start_ms)
+        fade_in, fade_out = min(max(0, fade_in_ms), span // 2), min(max(0, fade_out_ms), span // 2)
+        if fade_in or fade_out:
+            lead += f"\\fad({fade_in},{fade_out})"
         # The pill overhangs its word; hard spaces keep it clear of the neighbors
         # (on every event, so words don't shift as the pill moves).
         gap = " \\h" if style.highlight_box_color and not style.karaoke_fill else " "

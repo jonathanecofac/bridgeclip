@@ -13,7 +13,7 @@ import { getBridgeRunnerPath, getEnginePath, resolvePythonPath, runtimeEnvironme
 import { resolveBinary } from './tools'
 import { logger } from './logger'
 
-type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source' | 'create-project'
+type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source' | 'create-project' | 'preview-frame'
 interface EditorOperation { progress?: EditorSession['progress']; action: NonNullable<EditorSession['operation']>; child?: ChildProcess; cancelled?: boolean; abort?: AbortController; batch?: EditorBatch }
 const operations = new Map<string, EditorOperation>()
 export function editorBusy(path: string): boolean { return operations.has(realpathSync(path)) }
@@ -52,6 +52,8 @@ function mediaNames(project: EditorProject): { source: string; preview: string }
 }
 
 const EDITOR_MEDIA = /^editor-(?:source|preview)(?:-[a-f0-9]{32})?\.mp4(?:\.partial\.mp4)?$/
+/** Exact-preview stills; only the latest is shown and none are needed once the editor reloads. */
+const EDITOR_FRAME = /^editor-frame-[a-f0-9]{32}\.png$/
 /**
  * Remove leftovers of killed or cancelled operations: `.editor-*` temp files and
  * folders, and editor media the project does not reference. Runs only while no
@@ -69,7 +71,8 @@ function sweepEditorFiles(run: string, project?: EditorProject): void {
   let removed = 0
   for (const entry of entries) {
     const temporary = entry.name.startsWith('.editor-')
-    if (!temporary && !(keep && EDITOR_MEDIA.test(entry.name) && !keep.has(entry.name) && (entry.isFile() || entry.isSymbolicLink()))) continue
+    const frame = EDITOR_FRAME.test(entry.name) && (entry.isFile() || entry.isSymbolicLink())
+    if (!temporary && !frame && !(keep && EDITOR_MEDIA.test(entry.name) && !keep.has(entry.name) && (entry.isFile() || entry.isSymbolicLink()))) continue
     try { rmSync(join(run, entry.name), { recursive: temporary && entry.isDirectory(), force: true }); removed++ } catch { /* A playing preview can stay open on Windows; retry next time. */ }
   }
   if (removed) logger.info('editor.sweep', { removed })
@@ -141,6 +144,8 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
       const edit = clean.find((e) => e.id === c.id)
       if (!edit) throw new Error('Candidate is missing')
       const next = { ...c, ...edit }
+      // Optional edit fields that were cleared (no overrides, no added captions, title card off).
+      for (const key of ['caption_style', 'caption_inserts', 'title_card'] as const) if (!(key in edit)) delete next[key]
       if (edit.status === 'baked') {
         // Unchanged since its render, or restored to the exact render "Refine again" left.
         const unchanged = c.status === 'baked' ? renderEditKey(edit) === renderEditKey(c) : !!c.baked_hash && c.exports.length > 0 && bakedHash(edit) === c.baked_hash
@@ -473,4 +478,34 @@ export async function createEditorProject(path: unknown, chosen?: unknown): Prom
 export function readEditorOperation(path: unknown): { operation: EditorOperation['action'] | null; progress?: EditorSession['progress'] } {
   const operation = operations.get(runPath(path))
   return { operation: operation?.action ?? null, ...(operation?.progress ? { progress: { ...operation.progress } } : {}) }
+}
+
+/**
+ * Render the exported picture at source time `atMs` for one candidate (the
+ * editor's "Exact preview"). It uses the saved project, through the same
+ * render path as export, and changes nothing in the project or library.
+ */
+export async function previewEditorFrame(path: unknown, revision: unknown, candidateId: unknown, atMs: unknown): Promise<{ path: string }> {
+  const run = runPath(path)
+  if (typeof atMs !== 'number' || !Number.isFinite(atMs)) throw new Error('Invalid preview time')
+  if (operations.has(run) || operations.size >= 2) throw new Error('An editor operation is already running. Try again when it finishes.')
+  const operation: EditorOperation = { action: 'preview-frame' }
+  operations.set(run, operation)
+  const frameId = randomUUID().replaceAll('-', '')
+  try {
+    const session = await openEditor(run)
+    if (session.project.media_freed) throw new Error('Editor media was freed. This project is read-only.')
+    if (revision !== session.project.revision || !session.project.candidates.some((c) => c.id === candidateId)) throw new Error('Project changed. Reopen it and retry.')
+    for (const entry of readdirSync(run)) if (EDITOR_FRAME.test(entry)) { try { unlinkSync(join(run, entry)) } catch { /* An open image can stay on Windows. */ } }
+    const settings = loadSettings()
+    const { env, python } = workerSetup(settings)
+    await runWorker(run, operation, 'preview-frame', env, python, 10 * 60 * 1000,
+      { run, library: realpathSync(settings.outputDirectory), revision, candidate_id: candidateId, action: 'preview-frame', at_ms: atMs, frame_id: frameId })
+    const file = join(run, `editor-frame-${frameId}.png`)
+    if (lstatSync(file).isSymbolicLink() || !isWithinDirectory(file, run)) throw new Error(editorFailureMessage('preview-frame'))
+    return { path: file }
+  } finally {
+    operation.child = undefined
+    operations.delete(run)
+  }
 }

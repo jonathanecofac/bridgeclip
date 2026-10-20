@@ -2,6 +2,7 @@ import type { JevThresholdSettings } from '../shared/jev-settings'
 import type { LibraryClipTarget } from '../shared/library-posting'
 import type { AutomationReviewResult } from '../shared/automations'
 import type { CandidateEdit, EditorProgressSummary, EditorSession } from '../shared/clip-editor'
+import type { CaptionStyleOverrides, UserCaptionPreset } from '../shared/caption-style'
 import type { JobOutput } from '../shared/job-output'
 import type { EditAudit } from '../shared/editorial'
 import { contextBridge, ipcRenderer } from 'electron'
@@ -132,6 +133,13 @@ export interface BridgeClipAPI {
     create: (path: string, source?: string | null) => Promise<EditorSession>
     /** The running editor operation for a run, readable before it has a project. */
     operation: (path: string) => Promise<{ operation: EditorSession['operation']; progress?: EditorSession['progress'] }>
+    /** The exported picture at a source time, rendered by the engine from the saved project. */
+    previewFrame: (path: string, revision: number, id: string, atMs: number) => Promise<{ path: string }>
+  }
+  captionPresets: {
+    list: () => Promise<UserCaptionPreset[]>
+    save: (name: string, base: string, style: CaptionStyleOverrides) => Promise<UserCaptionPreset[]>
+    delete: (id: string) => Promise<UserCaptionPreset[]>
   }
   edits: { inspect: (outputDir: string) => Promise<EditAudit> }
   models: { list: (refresh?: boolean) => Promise<OpenRouterCatalog> }
@@ -320,7 +328,13 @@ const api: BridgeClipAPI = {
     onSaveBeforeClose: (callback) => subscribe<void>('editor:saveBeforeClose', () => callback()),
     closeReady: (saved) => ipcRenderer.invoke('editor:closeReady', saved),
     create: (path, source) => ipcRenderer.invoke('editor:create', path, source ?? null),
-    operation: (path) => ipcRenderer.invoke('editor:operation', path)
+    operation: (path) => ipcRenderer.invoke('editor:operation', path),
+    previewFrame: (path, revision, id, atMs) => ipcRenderer.invoke('editor:previewFrame', path, revision, id, atMs)
+  },
+  captionPresets: {
+    list: () => ipcRenderer.invoke('captionPresets:list'),
+    save: (name, base, style) => ipcRenderer.invoke('captionPresets:save', name, base, style),
+    delete: (id) => ipcRenderer.invoke('captionPresets:delete', id)
   },
   edits: { inspect: (outputDir) => ipcRenderer.invoke('edits:inspect', outputDir) },
   models: { list: (refresh = false) => ipcRenderer.invoke('models:list', refresh) },

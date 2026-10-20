@@ -8,7 +8,7 @@ const { buildApp, launchApp } = require('../zernio/support/electron-app.cjs')
 const { editorTools } = require('./editor-e2e-tools.cjs')
 const fixture = require('../fixtures/editor/project.json')
 
-test('static subtitle guide supports dragging and undo, and persists across reopening', { timeout: 90000 }, async t => {
+test('live subtitle preview shows the words at the playhead, supports dragging and undo, and persists across reopening', { timeout: 90000 }, async t => {
   const tools = editorTools(t)
   if (!tools) return
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-caption-position-'))
@@ -49,10 +49,11 @@ test('static subtitle guide supports dragging and undo, and persists across reop
   const overlay = page.getByRole('button', { name: 'Subtitle position', exact: true })
   await overlay.waitFor()
   const sample = async () => (await overlay.innerText()).replace(/\s+/g, ' ').trim()
-  assert.equal(await sample(), 'Captions go here')
+  // The words spoken at the playhead (first cut starts at 1 s, mid-sentence), in the clip's caption style.
+  assert.equal(await sample(), 'the setup')
   await page.getByRole('button', { name: 'Play / pause', exact: true }).click()
   await page.waitForFunction(() => document.querySelector('video').currentTime > 1.3)
-  assert.equal(await sample(), 'Captions go here', 'sample stays steady during playback')
+  assert.match(await sample(), /^(the setup|Captions go here)$/, 'captions follow playback')
   await page.getByRole('button', { name: 'Play / pause', exact: true }).click()
   await page.getByRole('button', { name: 'Top', exact: true }).click()
   assert.equal((await saved()).caption_y, .2)
@@ -73,7 +74,7 @@ test('static subtitle guide supports dragging and undo, and persists across reop
   await page.getByRole('button', { name: 'Edit caption at 0:00.000', exact: true }).click()
   await page.getByRole('textbox', { name: 'Caption at 0:00.000', exact: true }).fill('A corrected subtitle')
   await seek(1000)
-  assert.equal(await sample(), 'Captions go here', 'caption edits do not change the placement guide')
+  assert.match(await sample(), /corrected subtitle/, 'caption corrections show in the preview')
   await saved()
   await page.screenshot({ path: '/tmp/bridgeclip-subtitle-position.png' })
   // Switching via either candidate list preserves the inspector tab while

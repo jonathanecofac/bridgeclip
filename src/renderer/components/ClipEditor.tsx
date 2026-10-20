@@ -2,15 +2,18 @@ import { SavedStageTimings } from './StageBreakdown'
 import { registerNavigationCommit } from '../lib/navigation'
 import { nextCaptionRange } from '../lib/caption-ranges'
 import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Archive, Check, ChevronLeft, ChevronRight, ChevronDown, Download, Film, Loader2, Pause, Pencil, Play, Redo2, RotateCcw, Scissors, SkipBack, Undo2, X } from 'lucide-react'
+import { Archive, Check, ChevronLeft, ChevronRight, ChevronDown, Download, Eye, Film, Loader2, Pause, Pencil, Play, Plus, Redo2, RotateCcw, Scissors, SkipBack, Trash2, Undo2, X } from 'lucide-react'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatTimecode, localFileUrl, parseTimecode } from '../lib/utils'
+import { effectiveCaptionStyle, minimalOverrides } from '../../shared/caption-style'
+import type { CaptionEdit, CaptionInsert } from '../../shared/clip-editor'
 import { EDITOR_REVISION_CONFLICT, cameraMarkers, snapFrame, stepFrame, candidateEdit, canAnimateScene, defaultCrop, editDuration, editSignature, editorProgress, framingAt, normalizeSceneTransitions, refineEdit, renderEditKey, resizeCrop, retimeScene, sceneAt, trimRange, type CandidateEdit, type Crop, type CropCorner, type EditorCandidate, type EditorQuestion, type EditorRange, type EditorScene, type EditorSession } from '../../shared/clip-editor'
 import { CameraChanges, CameraScanButton } from './CameraChanges'
 import { ActionMenu } from './ui/ActionMenu'
 import { Button } from './ui/Button'
 import { ConfirmDialog } from './ui/ConfirmDialog'
-import { CaptionPresetPicker } from './CaptionPresetPicker'
+import { CaptionStylePanel } from './CaptionStylePanel'
+import { captionLines, type CaptionLine } from '../lib/caption-words'
 import { EditorCaptionPreview } from './EditorCaptionPreview'
 import { captionAnchor } from '../lib/caption-preview'
 import { Switch } from './ui/Switch'
@@ -85,6 +88,10 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
   const [undo, setUndo] = useState<EditorCandidate[][]>([])
   const [redo, setRedo] = useState<EditorCandidate[][]>([])
   const [editingCaption, setEditingCaption] = useState<number | null>(null)
+  /** Added caption being edited, by its start time (stable while its list is re-sorted). */
+  const [editingInsert, setEditingInsert] = useState<number | null>(null)
+  /** Engine-rendered frame for "Exact preview", valid while the playhead and edits stay put. */
+  const [exactFrame, setExactFrame] = useState<{ path: string; time: number; key: string } | null>(null)
   const firstCaptionChange = useRef(true)
   const captionInput = useRef<HTMLTextAreaElement>(null)
   const video = useRef<HTMLVideoElement>(null)
@@ -274,6 +281,7 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
   // Only candidate selection resets the playhead, never an edit.
   }, [selected, session?.previewPath])
   useEffect(() => { if (video.current && candidate) video.current.playbackRate = candidate.video_speed * reviewSpeed }, [candidate?.video_speed, reviewSpeed])
+  useEffect(() => { if (exactFrame && (Math.abs(exactFrame.time - time) > 1 || exactFrame.key !== key)) setExactFrame(null) }, [exactFrame, time, key])
   useEffect(() => {
     if (tab !== 'transcript' || !playing || video.current?.paused || showAudit || editingCaption !== null || !activeTranscript) return
     const panel = transcriptPanel.current, caption = activeCaption.current
@@ -385,6 +393,16 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
     }
     await run('export')
   }
+  const renderExactPreview = async (): Promise<void> => {
+    if (!candidate || busy) return
+    video.current?.pause(); setError(null); setBusy('preview-frame')
+    const at = timeRef.current
+    try {
+      await save()
+      const frame = await getApi().editor.previewFrame(outputDir, sessionRef.current!.project.revision, candidate.id, at)
+      setExactFrame({ path: frame.path, time: at, key: keyRef.current })
+    } catch (e) { setError(errorMessage(e)) } finally { setBusy(null) }
+  }
   const chooseReplacement = async (): Promise<void> => {
     video.current?.pause(); setEditingCaption(null)
     try {
@@ -435,10 +453,58 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
     if (!canEditCaption(index)) return
     video.current?.pause(); firstCaptionChange.current = true; setTab('transcript'); setEditingCaption(index)
   }
-  const updateCaption = (index: number, text: string, remember = true): void => {
+  /** One transcript line's correction: text and optional retiming. An edit equal to the original is dropped. */
+  const setCaptionEdit = (index: number, next: { text: string; start_ms?: number; end_ms?: number }, remember = true): void => {
+    const original = project.transcript[index]
     const caption_edits = (candidate.caption_edits ?? []).filter((e) => e.segment !== index)
-    if (text !== project.transcript[index].text) caption_edits.push({ segment: index, text })
+    const timed = next.start_ms !== undefined && next.end_ms !== undefined && (next.start_ms !== original.start_ms || next.end_ms !== original.end_ms)
+    if (next.text !== original.text || timed) caption_edits.push({ segment: index, text: next.text, ...(timed ? { start_ms: next.start_ms, end_ms: next.end_ms } : {}) })
     change({ caption_edits: caption_edits.sort((a, b) => a.segment - b.segment) }, remember)
+  }
+  const captionEditFor = (index: number): CaptionEdit | undefined => candidate.caption_edits?.find((e) => e.segment === index)
+  const updateCaption = (index: number, text: string, remember = true): void => {
+    const edit = captionEditFor(index)
+    setCaptionEdit(index, { text, start_ms: edit?.start_ms, end_ms: edit?.end_ms }, remember)
+  }
+  const captionTiming = (index: number): [number, number] => {
+    const edit = captionEditFor(index), row = project.transcript[index]
+    return [edit?.start_ms ?? row.start_ms, edit?.end_ms ?? row.end_ms]
+  }
+  const retimeCaption = (index: number, start: number, end: number, remember = true): void => {
+    const length = Math.max(100, end - start)
+    const a = Math.max(0, Math.min(project.duration_ms - length, Math.round(start)))
+    setCaptionEdit(index, { text: captionText(index), start_ms: a, end_ms: Math.min(project.duration_ms, a + Math.max(100, Math.round(end) - Math.round(start))) }, remember)
+  }
+  const inserts = candidate.caption_inserts ?? []
+  const setInserts = (caption_inserts: CaptionInsert[], remember = true): void => change({ caption_inserts: [...caption_inserts].sort((a, b) => a.start_ms - b.start_ms) }, remember)
+  const addCaption = (): void => {
+    if (inserts.length >= 200) return
+    video.current?.pause()
+    const start_ms = Math.max(0, Math.min(project.duration_ms - 100, Math.round(time)))
+    const item = { start_ms, end_ms: Math.min(project.duration_ms, start_ms + 1500), text: 'New caption' }
+    setInserts([...inserts, item]); setTab('transcript'); setEditingCaption(null); setEditingInsert(item.start_ms)
+  }
+  /** Drag a caption block on the timeline: the line keeps its length and moves in source time. */
+  const startCaptionDrag = (e: React.PointerEvent<HTMLButtonElement>, line: CaptionLine): void => {
+    if (editingDisabled || e.button !== 0) return
+    e.preventDefault(); e.stopPropagation(); video.current?.pause()
+    const target = e.currentTarget, bounds = target.parentElement!.getBoundingClientRect(), x = e.clientX
+    let moved = false
+    dragging.current = true; target.setPointerCapture(e.pointerId); setDragWindow([viewStart, viewEnd])
+    const move = (event: PointerEvent): void => {
+      const delta = Math.round((event.clientX - x) / bounds.width * (viewEnd - viewStart))
+      if (!moved && Math.abs(event.clientX - x) < 3) return
+      const length = line.end - line.start, start = Math.max(0, Math.min(project.duration_ms - length, line.start + delta))
+      if (line.segment !== null) retimeCaption(line.segment, start, start + length, !moved)
+      else setInserts(inserts.map((item, i) => i === line.insert ? { ...item, start_ms: start, end_ms: start + length } : item), !moved)
+      moved = true
+    }
+    const done = (): void => {
+      target.removeEventListener('pointermove', move); target.removeEventListener('lostpointercapture', done)
+      dragging.current = false; setDragWindow(null)
+      if (!moved) { seek(line.start); setTab('transcript'); if (line.segment !== null) editCaption(line.segment); else setEditingInsert(line.start) }
+    }
+    target.addEventListener('pointermove', move); target.addEventListener('lostpointercapture', done)
   }
   const current = reviewCurrent(candidate)
   const start = candidate.ranges[0][0], end = candidate.ranges[candidate.ranges.length - 1][1]
@@ -556,7 +622,7 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
       body: <>Use <strong>{replacement.split(/[\\/]/).pop()}</strong> for every clip in this project?<br /><br />Only recommended for the exact same video at higher quality: identical content, timing, audio and framing. Matching duration alone does not guarantee a match.<br /><br />Your cuts, layouts and caption edits will be kept. Previously baked clips will be ready to bake again. Existing exports will stay in the library.</>,
       onConfirm: () => { void replaceSource(replacement) }
     }} />}
-    {busy && <div role="status" className="editor-notice"><Loader2 size={14} className="animate-spin" />{busy === 'scan-cameras' ? <div className="editor-scan-progress"><span>{progress?.phase === 'preview' ? 'Preparing frame-accurate preview (one-time)' : 'Scanning frames for camera changes'}… {progress?.percent ?? 0}%</span><progress aria-label={progress?.phase === 'preview' ? 'Preview preparation progress' : 'Camera scan progress'} max={100} value={progress?.percent ?? 0} /></div> : busy === 'replace-source' ? 'Replacing source and preparing preview…' : busy === 'export-all' ? `Baking ready clips… ${batch?.completed ?? 0} of ${batch?.total ?? readyCount} complete${batch?.failed ? `, ${batch.failed} failed` : ''}` : busy === 'review' ? 'Jev is reviewing your edit…' : busy === 'export' ? 'Baking your final clip…' : 'Saving…'}<Button size="sm" variant="ghost" onClick={() => { void getApi().editor.cancel(outputDir) }}>Cancel</Button></div>}
+    {busy && <div role="status" className="editor-notice"><Loader2 size={14} className="animate-spin" />{busy === 'scan-cameras' ? <div className="editor-scan-progress"><span>{progress?.phase === 'preview' ? 'Preparing frame-accurate preview (one-time)' : 'Scanning frames for camera changes'}… {progress?.percent ?? 0}%</span><progress aria-label={progress?.phase === 'preview' ? 'Preview preparation progress' : 'Camera scan progress'} max={100} value={progress?.percent ?? 0} /></div> : busy === 'replace-source' ? 'Replacing source and preparing preview…' : busy === 'export-all' ? `Baking ready clips… ${batch?.completed ?? 0} of ${batch?.total ?? readyCount} complete${batch?.failed ? `, ${batch.failed} failed` : ''}` : busy === 'review' ? 'Jev is reviewing your edit…' : busy === 'export' ? 'Baking your final clip…' : busy === 'preview-frame' ? 'Rendering the exact export frame…' : busy === 'create-project' ? 'Preparing the editor…' : 'Saving…'}<Button size="sm" variant="ghost" onClick={() => { void getApi().editor.cancel(outputDir) }}>Cancel</Button></div>}
     <div className="editor-workspace">
       <aside className="editor-candidates"><div className="editor-pane-heading">Refine clips <span>{edits.length}</span></div>
         {(['refining', 'ready', 'baked', 'discarded'] as const).map((group) => {
@@ -612,9 +678,15 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
             <p className="editor-monitor-hint">{tab === 'framing' ? 'Drag inside to move · Drag a corner to resize' : 'Space to play · I / O to trim · S to split'} · 1 / 2 / 3 for speed</p>
           </div>
           <div className="editor-output-monitor">
-            <div className="editor-pane-heading">Output <span>{candidate.captions && suppressedCaptions.some(([a, b]) => a <= time && time < b) ? 'Captions suppressed' : project.aspect_ratio}</span></div>
+            <div className="editor-pane-heading">Output <span>{candidate.captions && suppressedCaptions.some(([a, b]) => a <= time && time < b) ? 'Captions suppressed' : project.aspect_ratio}</span>
+              <Button size="sm" variant="ghost" icon={busy === 'preview-frame' ? <Loader2 size={12} className="animate-spin" /> : <Eye size={12} />} disabled={!!busy || !candidate.ranges.some(([a, b]) => a <= time && time < b)}
+                tooltip="Render this exact frame with the export engine: captions, fonts, title card and framing exactly as the exported MP4." onClick={() => { void renderExactPreview() }}>Exact preview</Button></div>
             <canvas ref={canvas} width={aspect < 1 ? 360 : 640} height={aspect < 1 ? 640 : 360} style={{ aspectRatio: aspect }} />
-            {showSubtitlePreview && (tab === 'transcript' || tab === 'captions') && <EditorCaptionPreview canvas={canvas} project={project} candidate={candidate} time={time} disabled={editingDisabled} onMove={moveCaption} onDrag={active => { dragging.current = active; if (active) video.current?.pause() }} />}
+            {showSubtitlePreview && !exactFrame && <EditorCaptionPreview canvas={canvas} project={project} candidate={candidate} time={time} disabled={editingDisabled}
+              guide={tab === 'transcript' || tab === 'captions'} onMove={moveCaption} onMoveX={(x, remember) => { video.current?.pause(); change({ caption_style: minimalOverrides(candidate.caption_preset, { ...effectiveCaptionStyle(candidate.caption_preset, candidate.caption_style), x }) }, remember) }}
+              onDrag={active => { dragging.current = active; if (active) video.current?.pause() }} />}
+            {exactFrame && <div className="editor-exact-preview"><img src={localFileUrl(exactFrame.path)} alt={`Exported frame at ${clock(exactFrame.time)}`} />
+              <p>Exact export frame at {clock(exactFrame.time)}<Button size="sm" variant="ghost" onClick={() => setExactFrame(null)}>Close</Button></p></div>}
           </div>
         </div>
         <div className="editor-transport">
@@ -663,6 +735,15 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
               style={{ left: `${(Math.max(a, viewStart) - viewStart) / (viewEnd - viewStart) * 100}%`, width: `${(Math.min(b, viewEnd) - Math.max(a, viewStart)) / (viewEnd - viewStart) * 100}%` }}
               onClick={() => { seek(a); setTab('captions') }} />)}
           </div>}
+          {candidate.captions && <div className={cn('editor-caption-blocks', editingDisabled && 'opacity-60')} aria-label="Caption track">
+            {captionLines(project, candidate).filter((line) => line.end > viewStart && line.start < viewEnd).slice(0, 400).map((line) => {
+              const left = (Math.max(line.start, viewStart) - viewStart) / (viewEnd - viewStart), width = (Math.min(line.end, viewEnd) - Math.max(line.start, viewStart)) / (viewEnd - viewStart)
+              const selected = line.segment !== null ? editingCaption === line.segment : editingInsert === line.start
+              return <button key={line.segment ?? `added-${line.insert}`} className={cn('editor-caption-block', line.edited && 'edited', line.segment === null && 'added', selected && 'selected')}
+                style={{ left: `${left * 100}%`, width: `${width * 100}%` }} title={`${line.text} · ${clock(line.start)} – ${clock(line.end)} · Drag to move, click to edit`}
+                aria-label={`Caption ${clock(line.start)}: ${line.text}`} disabled={editingDisabled} onPointerDown={(e) => startCaptionDrag(e, line)}>{line.text}</button>
+            })}
+          </div>}
           <input aria-label="Fine timeline position" type="range" min={viewStart} max={viewEnd} step="any" value={Math.max(viewStart, Math.min(viewEnd, time))} onChange={(e) => seek(snapFrame(frames, Number(e.target.value)))} className="editor-fine-scrub" />
           <div className="editor-timeline-footer">
             <div className="editor-cut-list">{candidate.ranges.map(([a, b], i) => <div key={i} className="flex items-center gap-2"><span className="text-2xs text-ink-subtle">{i + 1}</span><TimeInput label={`Cut ${i + 1} start`} value={a} disabled={editingDisabled} onChange={(t) => { const ranges = candidate.ranges.map((r) => [...r] as [number, number]); ranges[i][0] = Math.max(i ? ranges[i - 1][1] : 0, Math.min(b - 100, t)); change({ ranges }) }} /><span className="text-ink-subtle">–</span><TimeInput label={`Cut ${i + 1} end`} value={b} disabled={editingDisabled} onChange={(t) => { const ranges = candidate.ranges.map((r) => [...r] as [number, number]); ranges[i][1] = Math.min(i + 1 < ranges.length ? ranges[i + 1][0] : project.duration_ms, Math.max(a + 100, t)); change({ ranges }) }} /><Button variant="ghost" size="sm" aria-label={`Remove cut ${i + 1}`} tooltip="Remove this cut from the clip. The source video is kept; Undo restores the cut." iconOnly icon={<X size={12} />} disabled={candidate.ranges.length === 1 || editingDisabled} onClick={() => change({ ranges: candidate.ranges.filter((_, j) => j !== i) })} /></div>)}</div>
@@ -686,11 +767,12 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
             {sceneIndex > 0 && frames.length > 0 && <div className="flex gap-2 mt-2"><Button size="sm" variant="ghost" disabled={editingDisabled} onClick={() => moveScene(sceneIndex, stepFrame(frames, currentScene.at_ms, -1))}>One frame earlier</Button><Button size="sm" variant="ghost" disabled={editingDisabled} onClick={() => moveScene(sceneIndex, stepFrame(frames, currentScene.at_ms, 1))}>One frame later</Button></div>}
             {sceneIndex + 1 < candidate.scenes.length && <p className="text-2xs text-ink-subtle mt-2">Until {clock(candidate.scenes[sceneIndex + 1].at_ms)}</p>}
           </div><Button size="sm" icon={<Scissors size={13} />} disabled={candidate.scenes.length >= 60 || time <= start || time >= end || candidate.scenes.some((s) => Math.abs(s.at_ms - time) < .01)} onClick={() => newLayout()}>New layout here</Button>{sceneIndex > 0 && <Button size="sm" variant="ghost" onClick={() => change({ scenes: candidate.scenes.filter((_, i) => i !== sceneIndex) })}>Remove layout change</Button>}<Button size="sm" variant="ghost" onClick={() => change({ scenes: [{ ...currentScene, at_ms: 0 }] })}>Use layout for whole clip</Button></div></fieldset>}
-          {tab === 'captions' && <fieldset disabled={editingDisabled} className="space-y-4 mt-4"><div className="flex items-center justify-between text-xs"><span>Burn in captions</span><Switch label="Burn in captions" checked={candidate.captions} onChange={(captions) => change({ captions })} /></div><div className="flex items-center justify-between text-xs"><span title="Draws the clip title as a card at the top of the video, like Automatic clips.">Title card</span><Switch label="Title card" checked={candidate.title_card === true} onChange={(title_card) => change({ title_card })} /></div><p className="text-2xs text-ink-subtle">Captions follow your final cuts. Use the placement guide in Transcript to position them before baking.</p><CaptionSuppression key={candidate.id} ranges={suppressedCaptions} cuts={candidate.ranges} time={time} duration={project.duration_ms} disabled={editingDisabled || !candidate.captions} onChange={(caption_suppression_ranges) => { video.current?.pause(); change({ caption_suppression_ranges }) }} seek={seek} />{candidate.captions && <CaptionPresetPicker value={candidate.caption_preset} onChange={(caption_preset) => change({ caption_preset })} />}<label className="editor-label">Export speed<select value={candidate.video_speed} onChange={(e) => change({ video_speed: Number(e.target.value) })}>{[1, 1.1, 1.25, 1.5, 1.75, 2].map((n) => <option key={n} value={n}>{n}×</option>)}</select></label></fieldset>}
+          {tab === 'captions' && <fieldset disabled={editingDisabled} className="space-y-4 mt-4"><div className="flex items-center justify-between text-xs"><span>Burn in captions</span><Switch label="Burn in captions" checked={candidate.captions} onChange={(captions) => change({ captions })} /></div><div className="flex items-center justify-between text-xs"><span title="Draws the clip title as a card at the top of the video, like Automatic clips.">Title card</span><Switch label="Title card" checked={candidate.title_card === true} onChange={(title_card) => change({ title_card })} /></div><p className="text-2xs text-ink-subtle">Captions follow your final cuts. Fix words and timing in Transcript; use Exact preview to see the exported frame.</p><CaptionSuppression key={candidate.id} ranges={suppressedCaptions} cuts={candidate.ranges} time={time} duration={project.duration_ms} disabled={editingDisabled || !candidate.captions} onChange={(caption_suppression_ranges) => { video.current?.pause(); change({ caption_suppression_ranges }) }} seek={seek} />{candidate.captions && <CaptionStylePanel preset={candidate.caption_preset} overrides={candidate.caption_style} captionY={candidate.caption_y ?? null}
+            onChange={(patch, remember) => change(patch, remember)} onCaptionY={(y, remember) => { if (y === null) change({ caption_y: null }); else moveCaption(y, remember) }} />}<label className="editor-label">Export speed<select value={candidate.video_speed} onChange={(e) => change({ video_speed: Number(e.target.value) })}>{[1, 1.1, 1.25, 1.5, 1.75, 2].map((n) => <option key={n} value={n}>{n}×</option>)}</select></label></fieldset>}
           {tab === 'transcript' && <section className="editor-subtitle-controls" aria-label="Subtitle placement">
             <div className="flex items-center justify-between gap-2 text-xs"><span>Subtitle placement guide</span><Switch label="Show subtitle guide" checked={showSubtitlePreview} onChange={setShowSubtitlePreview} /></div>
             {!candidate.captions ? <p className="text-2xs text-ink-muted">Subtitles are off for this clip. <button className="underline" disabled={editingDisabled} onClick={() => change({ captions: true })}>Enable subtitles</button></p>
-              : <p className="text-2xs text-ink-subtle">Drag “Captions go here” up or down to choose where your subtitles sit. This position applies throughout the clip.</p>}
+              : <p className="text-2xs text-ink-subtle">Drag the captions on the output preview to place them, or use these buttons. This position applies throughout the clip; more styling is in Captions.</p>}
             <fieldset disabled={editingDisabled || !candidate.captions}>
               <label className="editor-label">Vertical position <span className="float-right">{candidate.caption_y == null ? 'Automatic' : `${Math.round(captionPosition * 100)}% from top`}</span>
                 <input aria-label="Subtitle vertical position" type="range" min={10} max={90} step={1} value={Math.max(10, Math.min(90, captionPosition * 100))} onChange={e => moveCaption(Number(e.target.value) / 100)} />
@@ -699,7 +781,19 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
                 <Button variant="ghost" size="sm" disabled={candidate.caption_y == null} onClick={() => change({ caption_y: null })}>Automatic</Button></div>
             </fieldset>
           </section>}
-          {tab === 'transcript' && <div className="editor-transcript"><p className="text-2xs text-ink-subtle">Caption edits apply to this clip.</p>{project.transcript.map((r, i) => {
+          {tab === 'transcript' && <section className="editor-subtitle-controls" aria-label="Added captions">
+            <div className="flex items-center justify-between text-xs"><span>Added captions{inserts.length ? ` (${inserts.length})` : ''}</span>
+              <Button size="sm" icon={<Plus size={12} />} disabled={editingDisabled || inserts.length >= 200} tooltip="Add a caption of your own at the playhead." onClick={addCaption}>Add at playhead</Button></div>
+            {inserts.map((item, i) => <div key={`${i}-${item.start_ms}`} className={cn('editor-caption-range', editingInsert === item.start_ms && 'border-accent/60')}>
+              <textarea aria-label={`Added caption ${i + 1}`} rows={2} maxLength={500} value={item.text} disabled={editingDisabled} onFocus={() => setEditingInsert(item.start_ms)}
+                onChange={(e) => { if (e.target.value.trim()) setInserts(inserts.map((x, j) => j === i ? { ...x, text: e.target.value } : x)) }} />
+              <div className="flex flex-wrap items-end gap-2 mt-1">{([0, 1] as const).map((edge) => <label key={edge} className="text-2xs text-ink-subtle">{edge === 0 ? 'Start' : 'End'}<TimeInput label={`Added caption ${i + 1} ${edge === 0 ? 'start' : 'end'}`} value={edge === 0 ? item.start_ms : item.end_ms} disabled={editingDisabled}
+                onChange={(t) => setInserts(inserts.map((x, j) => j !== i ? x : edge === 0 ? { ...x, start_ms: Math.max(0, Math.min(x.end_ms - 100, Math.round(t))) } : { ...x, end_ms: Math.min(project.duration_ms, Math.max(x.start_ms + 100, Math.round(t))) }))} /></label>)}
+                <Button size="sm" variant="ghost" onClick={() => seek(item.start_ms)}>Go to</Button>
+                <Button size="sm" variant="ghost" iconOnly aria-label={`Delete added caption ${i + 1}`} icon={<Trash2 size={12} />} disabled={editingDisabled} onClick={() => setInserts(inserts.filter((_, j) => j !== i))} /></div>
+            </div>)}
+          </section>}
+          {tab === 'transcript' && <div className="editor-transcript"><p className="text-2xs text-ink-subtle">Caption edits apply to this clip. Click a line's pencil to fix its words or timing, or drag captions on the timeline.</p>{project.transcript.map((r, i) => {
             const nearClip = r.end_ms >= start - 15000 && r.start_ms <= end + 15000
             const nearPlayhead = r.end_ms >= time - 15000 && r.start_ms <= time + 15000
             if (!nearClip && !nearPlayhead && editingCaption !== i) return null
@@ -712,7 +806,13 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
               {editingCaption === i ? <><textarea ref={captionInput} aria-label={`Caption at ${clock(r.start_ms)}`} maxLength={2000} rows={3} value={captionText(i)} disabled={editingDisabled}
                 onChange={(e) => { updateCaption(i, e.target.value, firstCaptionChange.current); firstCaptionChange.current = false }}
                 onKeyDown={(e) => { if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) { e.preventDefault(); setEditingCaption(null) } }} />
-                <div className="flex items-center justify-between mt-2"><Button size="sm" variant="ghost" disabled={editingDisabled || !edited} onClick={() => updateCaption(i, r.text)}>Reset text</Button><Button size="sm" onClick={() => setEditingCaption(null)}>Done</Button></div></>
+                <div className="flex flex-wrap items-end gap-2 mt-2">{([0, 1] as const).map((edge) => <label key={edge} className="text-2xs text-ink-subtle">{edge === 0 ? 'Start' : 'End'}<TimeInput label={`Caption ${edge === 0 ? 'start' : 'end'}`} value={captionTiming(i)[edge]} disabled={editingDisabled}
+                  onChange={(t) => { const [a, b] = captionTiming(i); if (edge === 0) retimeCaption(i, Math.min(t, b - 100), b); else retimeCaption(i, a, Math.max(t, a + 100)) }} /></label>)}
+                  <Button size="sm" variant="ghost" disabled={editingDisabled} tooltip="Start this caption at the playhead." onClick={() => { const b = captionTiming(i)[1]; retimeCaption(i, Math.min(time, b - 100), b) }}>Start here</Button>
+                  <Button size="sm" variant="ghost" disabled={editingDisabled} tooltip="End this caption at the playhead." onClick={() => { const [a] = captionTiming(i); retimeCaption(i, a, Math.max(time, a + 100)) }}>End here</Button></div>
+                <div className="flex items-center justify-between mt-2"><div className="flex gap-1"><Button size="sm" variant="ghost" disabled={editingDisabled || !edited} onClick={() => setCaptionEdit(i, { text: r.text })}>Reset</Button>
+                  <Button size="sm" variant="ghost" icon={<Trash2 size={12} />} disabled={editingDisabled || !captionText(i).trim()} tooltip="Hide this caption in this clip. The audio stays." onClick={() => updateCaption(i, '')}>Delete</Button></div>
+                  <Button size="sm" onClick={() => setEditingCaption(null)}>Done</Button></div></>
                 : <button className="editor-transcript-text" onClick={() => seek(r.start_ms)}>{captionText(i).trim() || <em>Caption hidden</em>}</button>}
             </div>
           })}{!project.transcript.length && <p>No spoken transcript is available for this source.</p>}</div>}

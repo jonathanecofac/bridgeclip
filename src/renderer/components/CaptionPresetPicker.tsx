@@ -245,6 +245,103 @@ const PRESETS: CaptionPreset[] = [
     uppercase: false,
     future: 'dim',
     words: ['I think', 'that’s', 'fair']
+  },
+  {
+    id: 'viral_bold',
+    name: 'Viral Bold',
+    description: 'Heavy type, word on a yellow block',
+    font: '"Montserrat", "Montserrat Black", system-ui, sans-serif',
+    weight: 900,
+    size: 16,
+    primary: '#FFFFFF',
+    highlight: '#111111',
+    stroke: 7,
+    shadow: 'soft',
+    uppercase: true,
+    pill: '#FFE234',
+    maxWords: 2,
+    words: ['', 'stop', 'scrolling']
+  },
+  {
+    id: 'hormozi',
+    name: 'Hormozi Style',
+    description: 'Big expressive caps, yellow and green',
+    font: '"Montserrat", "Montserrat Black", system-ui, sans-serif',
+    weight: 900,
+    size: 16,
+    primary: '#FFFFFF',
+    highlight: '#FFE600',
+    stroke: 9,
+    shadow: 'hard',
+    uppercase: true,
+    words: ['make', 'more', 'money']
+  },
+  {
+    id: 'karaoke',
+    name: 'Karaoke',
+    description: 'Words fill with colour as spoken',
+    font: '"Poppins", "Poppins Black", system-ui, sans-serif',
+    weight: 900,
+    size: 13,
+    primary: '#FFFFFF',
+    highlight: '#00E5FF',
+    stroke: 5,
+    shadow: 'soft',
+    uppercase: true,
+    karaoke: true,
+    maxWords: 5,
+    entrancePop: false,
+    words: ['sing', 'along', 'now']
+  },
+  {
+    id: 'minimal_clean',
+    name: 'Minimal Clean',
+    description: 'Discreet, no highlight',
+    font: '"Montserrat", "Montserrat ExtraBold", system-ui, sans-serif',
+    weight: 800,
+    size: 12,
+    primary: '#FFFFFF',
+    highlight: '#FFFFFF',
+    stroke: 0,
+    shadow: 'halo',
+    uppercase: false,
+    maxWords: 5,
+    entrancePop: false,
+    words: ['Simple and', 'clean', 'text']
+  },
+  {
+    id: 'gaming',
+    name: 'Gaming',
+    description: 'Condensed caps, neon green glow',
+    font: '"Anton", system-ui, sans-serif',
+    weight: 400,
+    size: 18,
+    primary: '#FFFFFF',
+    highlight: '#39FF14',
+    stroke: 7,
+    shadow: 'hard',
+    uppercase: true,
+    glow: '#00FF66',
+    maxWords: 2,
+    words: ['', 'clutch', 'play']
+  },
+  {
+    id: 'cinematic',
+    name: 'Cinematic',
+    description: 'Italic serif with soft fades',
+    font: '"Instrument Serif", serif',
+    weight: 400,
+    italic: true,
+    size: 17,
+    primary: '#F5F0E6',
+    highlight: '#FFE6B8',
+    stroke: 0,
+    shadow: 'halo',
+    uppercase: false,
+    future: 'dim',
+    maxWords: 5,
+    entrancePop: false,
+    words: ['and then', 'everything', 'changed']
   }
 ]
 
@@ -447,15 +544,18 @@ interface CaptionPresetPickerProps {
   onChange: (preset: string) => void
   disabled?: boolean
   showPreview?: boolean
+  /** Presets to offer, in this order (default: all). */
+  ids?: readonly string[]
 }
 
-export function CaptionPresetPicker({ value, onChange, disabled, showPreview = false }: CaptionPresetPickerProps): React.JSX.Element {
+export function CaptionPresetPicker({ value, onChange, disabled, showPreview = false, ids }: CaptionPresetPickerProps): React.JSX.Element {
   const current = PRESETS.find((preset) => preset.id === value) ?? PRESETS[0]
+  const offered = ids ? ids.flatMap((id) => PRESETS.filter((preset) => preset.id === id)) : PRESETS
   return (
     <div>
       {showPreview && <CaptionMotionPreview key={current.id} preset={current} disabled={disabled} />}
       <div className="grid grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-2" role="radiogroup" aria-label="Caption style">
-        {PRESETS.map((preset) => {
+        {offered.map((preset) => {
           const selected = value === preset.id
           return (
             <button

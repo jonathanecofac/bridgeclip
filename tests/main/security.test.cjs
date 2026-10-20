@@ -182,7 +182,7 @@ test('the native picker authorizes media and shell opening rejects aliased appli
       './settings-store': { loadSettings: () => ({ outputDirectory: library }) },
       './file-manager': {},
       './output-storage': { measureOutputStorage: async (directory) => ({ outputDirectory: directory, bytes: 0 }) },
-      './clip-editor': {},
+      './clip-editor': {}, './caption-presets-store': {},
       './edit-inspector': { inspectEdits: async () => ({}) },
       './run-history': runHistory,
       './pipeline-runner': {},

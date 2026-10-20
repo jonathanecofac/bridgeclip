@@ -204,3 +204,48 @@ def test_create_project_requires_the_linked_source(tmp_path):
     with pytest.raises(Exception) as error:
         asyncio.run(run_editor({'run': str(run), 'library': str(library), 'action': 'create-project'}))
     assert getattr(error.value, 'editor_code', None) == 'source_missing'
+
+
+def frame(path, at=None):
+    import numpy as np
+    args = ['ffmpeg', '-v', 'error', *(['-ss', f'{at:.3f}'] if at is not None else []), '-i', str(path), '-frames:v', '1',
+            '-vf', 'scale=540:960', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+    return np.frombuffer(subprocess.run(args, capture_output=True, check=True, timeout=60).stdout, dtype=np.uint8).reshape(960, 540, 3).astype(int)
+
+
+@pytest.mark.parametrize('preset, style, ranges, at_ms, offset_s', [
+    # Future words of the on-screen group lie after the playhead ("MONDE" while "LE" is spoken).
+    ('viral_bold', {}, [[2000, 5000]], 3200, 1.2),
+    # Custom style, cut inside a caption group, retimed and inserted lines.
+    ('hormozi', {'primary_color': '#FF00FF', 'font_size': 120, 'line_box_color': '#000000', 'x': .4}, [[2000, 3000], [3600, 4800]], 4200, 1.6),
+    ('cinematic', {'max_words_per_line': 3}, [[2050, 4900]], 4450, 2.4),
+])
+def test_exact_preview_matches_the_exported_frame_and_changes_nothing(monkeypatch, tmp_path, preset, style, ranges, at_ms, offset_s):
+    """The preview is rendered by the export path: same captions, style overrides, title card and framing."""
+    ffmpeg_ready()
+    library, run = automatic_run(tmp_path)
+    asyncio.run(run_editor({'run': str(run), 'library': str(library), 'action': 'create-project'}))
+    project = json.loads((run / 'editor-project.json').read_text(encoding='utf8'))
+    c = project['candidates'][0]
+    c.update(ranges=ranges, status='ready', title_card=True, caption_preset=preset, caption_style=style)
+    if preset == 'hormozi':
+        c.update(caption_edits=[{'segment': 0, 'text': 'Bonjour tout le monde voici été', 'start_ms': 2000, 'end_ms': 4800}],
+                 caption_inserts=[{'start_ms': 4000, 'end_ms': 4700, 'text': 'Ajouté'}])
+    (run / 'editor-project.json').write_text(json.dumps(project), encoding='utf8')
+    before = (run / 'editor-project.json').read_bytes(), (run / 'job_output.json').read_bytes()
+    frame_id = 'a' * 32
+    asyncio.run(run_editor({'run': str(run), 'library': str(library), 'revision': 0, 'candidate_id': c['id'],
+                            'action': 'preview-frame', 'at_ms': at_ms, 'frame_id': frame_id}))
+    preview = run / f'editor-frame-{frame_id}.png'
+    assert preview.is_file()
+    assert ((run / 'editor-project.json').read_bytes(), (run / 'job_output.json').read_bytes()) == before
+    asyncio.run(run_editor({'run': str(run), 'library': str(library), 'revision': 0, 'candidate_id': c['id'], 'action': 'export'}))
+    exported = json.loads((run / 'job_output.json').read_text(encoding='utf8'))['clips'][-1]['s3_url']
+    changed = int((abs(frame(preview) - frame(exported, offset_s)).max(axis=2) > 80).sum())
+    assert changed < 150, f'{changed} pixels of the preview differ from the export'
+    if preset == 'hormozi':
+        pixels = frame(preview)
+        assert ((pixels[:, :, 0] > 200) & (pixels[:, :, 1] < 80) & (pixels[:, :, 2] > 200)).sum() > 200, 'custom color drawn'
+    with pytest.raises(EditorError):
+        asyncio.run(run_editor({'run': str(run), 'library': str(library), 'revision': 1, 'candidate_id': c['id'],
+                                'action': 'preview-frame', 'at_ms': 1000, 'frame_id': 'b' * 32}))

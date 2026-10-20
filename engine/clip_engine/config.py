@@ -5,7 +5,9 @@ Only essential environment variables are exposed. All other settings are hardcod
 for consistency and simplicity.
 """
 
+import math
 import os
+import re
 from functools import lru_cache
 from typing import List, Literal, Optional
 
@@ -220,6 +222,12 @@ class CaptionStyle:
     # (None disables). Chosen per preset to contrast with the highlight.
     emphasis_color: Optional[str] = None
 
+    # Horizontal center of the caption block, as a fraction of output width.
+    x_fraction: float = 0.5
+    # Fade each word group in when it appears / out when it leaves (0 = cut).
+    entrance_fade_ms: int = 0
+    exit_fade_ms: int = 0
+
 
 # ============================================================
 # CAPTION PRESETS
@@ -241,6 +249,13 @@ class CaptionPreset:
     HEADLINE = "headline"
     PAPER = "paper"
     SUBTLE = "subtle"
+    # Editor templates (Edit clip)
+    VIRAL_BOLD = "viral_bold"
+    HORMOZI = "hormozi"
+    KARAOKE = "karaoke"
+    MINIMAL_CLEAN = "minimal_clean"
+    GAMING = "gaming"
+    CINEMATIC = "cinematic"
 
 
 DEFAULT_CAPTION_PRESET = CaptionPreset.POP
@@ -262,6 +277,12 @@ def get_caption_preset(preset_id: str) -> CaptionStyle:
         CaptionPreset.HEADLINE: _create_headline_style,
         CaptionPreset.PAPER: _create_paper_style,
         CaptionPreset.SUBTLE: _create_subtle_style,
+        CaptionPreset.VIRAL_BOLD: _create_viral_bold_style,
+        CaptionPreset.HORMOZI: _create_hormozi_style,
+        CaptionPreset.KARAOKE: _create_karaoke_style,
+        CaptionPreset.MINIMAL_CLEAN: _create_minimal_clean_style,
+        CaptionPreset.GAMING: _create_gaming_style,
+        CaptionPreset.CINEMATIC: _create_cinematic_style,
     }
 
     builder = builders.get(preset_id)
@@ -275,6 +296,42 @@ def get_caption_preset(preset_id: str) -> CaptionStyle:
 def get_available_presets() -> list[dict]:
     """Get list of available caption presets with metadata."""
     return [
+        {
+            "id": CaptionPreset.VIRAL_BOLD,
+            "name": "Viral Bold",
+            "description": "Extra-heavy type, two words at a time, the spoken word on a yellow block",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#FFE234"},
+        },
+        {
+            "id": CaptionPreset.HORMOZI,
+            "name": "Hormozi Style",
+            "description": "Big expressive caps, heavy stroke, active word in yellow and key words in green",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#FFE600"},
+        },
+        {
+            "id": CaptionPreset.KARAOKE,
+            "name": "Karaoke",
+            "description": "The whole phrase on screen, each word fills with color as it is spoken",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#00E5FF"},
+        },
+        {
+            "id": CaptionPreset.MINIMAL_CLEAN,
+            "name": "Minimal Clean",
+            "description": "Discreet sentence-case subtitles with a soft shadow and no highlight",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#FFFFFF"},
+        },
+        {
+            "id": CaptionPreset.GAMING,
+            "name": "Gaming",
+            "description": "Punchy condensed caps with a neon-green glow on the active word",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#39FF14"},
+        },
+        {
+            "id": CaptionPreset.CINEMATIC,
+            "name": "Cinematic",
+            "description": "Elegant italic serif that fades in and out, upcoming words dimmed",
+            "preview_colors": {"primary": "#F5F0E6", "highlight": "#FFE6B8"},
+        },
         {
             "id": CaptionPreset.POP,
             "name": "Pop",
@@ -932,3 +989,197 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+
+
+def _create_viral_bold_style() -> CaptionStyle:
+    """Viral Bold: heavy Montserrat, two words, the spoken word on a yellow block."""
+    s = CaptionStyle()
+    s.font_size = 96
+    s.max_words_per_line = 2
+    s.highlight_color = "#111111"
+    s.highlight_box_color = "#FFE234"
+    s.highlight_box_padding = 14
+    s.outline_width = 7
+    s.shadow_opacity = 0.7
+    s.emphasis_color = "#3DFF8B"
+    return s
+
+
+def _create_hormozi_style() -> CaptionStyle:
+    """Hormozi: big caps, heavy stroke and hard shadow, yellow active word, green key words."""
+    s = CaptionStyle()
+    s.font_size = 100
+    s.max_words_per_line = 3
+    s.highlight_color = "#FFE600"
+    s.outline_width = 9
+    s.shadow_opacity = 0.95
+    s.shadow_blur = 1
+    s.shadow_offset = 8
+    s.emphasis_color = "#3DFF8B"
+    return s
+
+
+def _create_karaoke_style() -> CaptionStyle:
+    """Karaoke: the full phrase stays up while each word fills with cyan in time."""
+    s = CaptionStyle()
+    s.font_name = "Poppins Black"
+    s.font_size = 78
+    s.max_words_per_line = 5
+    s.highlight_color = "#00E5FF"
+    s.outline_width = 5
+    s.karaoke_fill = True
+    s.entrance_pop = False
+    s.entrance_fade_ms = 120
+    s.dim_opacity = 1.0
+    s.emphasis_color = "#FFE234"
+    return s
+
+
+def _create_minimal_clean_style() -> CaptionStyle:
+    """Minimal Clean: discreet sentence case, soft halo, no highlight or pop."""
+    s = CaptionStyle()
+    s.font_name = "Montserrat ExtraBold"
+    s.font_size = 60
+    s.uppercase = False
+    s.max_words_per_line = 5
+    s.highlight_color = "#FFFFFF"
+    s.outline_width = 0
+    s.shadow_opacity = 0.8
+    s.shadow_blur = 14
+    s.shadow_offset = 2
+    s.shadow_spread = 5
+    s.entrance_pop = False
+    s.entrance_fade_ms = 100
+    s.exit_fade_ms = 100
+    return s
+
+
+def _create_gaming_style() -> CaptionStyle:
+    """Gaming: condensed Anton caps, green active word with a neon bloom."""
+    s = CaptionStyle()
+    s.font_name = "Anton"
+    s.font_size = 116
+    s.letter_spacing = 1
+    s.max_words_per_line = 2
+    s.highlight_color = "#39FF14"
+    s.outline_width = 7
+    s.shadow_opacity = 0.9
+    s.shadow_blur = 2
+    s.shadow_offset = 8
+    s.glow_color = "#00FF66"
+    s.glow_opacity = 0.85
+    s.glow_radius = 8
+    s.glow_blur = 16
+    s.emphasis_color = "#FF3BD4"
+    return s
+
+
+def _create_cinematic_style() -> CaptionStyle:
+    """Cinematic: italic serif, warm white, slow fades and dimmed upcoming words."""
+    s = CaptionStyle()
+    s.font_name = "Instrument Serif Italic"
+    s.font_size = 96
+    s.italic = True
+    s.uppercase = False
+    s.letter_spacing = 1
+    s.max_words_per_line = 5
+    s.primary_color = "#F5F0E6"
+    s.highlight_color = "#FFE6B8"
+    s.outline_width = 0
+    s.shadow_opacity = 0.85
+    s.shadow_blur = 18
+    s.shadow_offset = 2
+    s.shadow_spread = 6
+    s.future_words = "dim"
+    s.dim_opacity = 0.5
+    s.entrance_pop = False
+    s.entrance_fade_ms = 250
+    s.exit_fade_ms = 250
+    return s
+
+
+# ============================================================
+# EDITOR CAPTION OVERRIDES
+# ============================================================
+
+# Faces shipped in assets/fonts that libass can select by name.
+CAPTION_FONTS = ("Montserrat Black", "Montserrat ExtraBold", "Poppins Black", "Poppins ExtraBold",
+                 "Anton", "Archivo Black", "Instrument Serif Italic")
+_HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+# name -> (kind, lo, hi) ; kinds: int, float, bool, color, color?, choice
+CAPTION_OVERRIDE_FIELDS: dict[str, tuple] = {
+    "font_name": ("choice", CAPTION_FONTS),
+    "font_size": ("int", 30, 220),
+    "uppercase": ("bool",),
+    "letter_spacing": ("int", -5, 20),
+    "max_words_per_line": ("int", 1, 8),
+    "word_by_word_highlight": ("bool",),
+    "primary_color": ("color",),
+    "highlight_color": ("color",),
+    "outline_color": ("color",),
+    "outline_width": ("int", 0, 20),
+    "shadow_opacity": ("float", 0, 1),
+    "shadow_blur": ("int", 0, 40),
+    "shadow_offset": ("int", 0, 30),
+    "future_words": ("choice", ("show", "dim", "hide")),
+    "karaoke_fill": ("bool",),
+    "entrance": ("choice", ("pop", "fade", "none")),
+    "exit": ("choice", ("fade", "none")),
+    "highlight_box_color": ("color?",),
+    "glow_color": ("color?",),
+    "line_box_color": ("color?",),
+    "line_box_opacity": ("float", 0, 1),
+    "emphasis_color": ("color?",),
+    "x": ("float", .1, .9),
+}
+
+
+def validate_caption_overrides(value) -> dict:
+    """A clean copy of editor caption overrides; raises ValueError on anything else."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or len(value) > len(CAPTION_OVERRIDE_FIELDS):
+        raise ValueError("Invalid caption style")
+    clean = {}
+    for key, item in value.items():
+        spec = CAPTION_OVERRIDE_FIELDS.get(key)
+        if spec is None:
+            raise ValueError(f"Unknown caption style field: {key}")
+        kind = spec[0]
+        if kind == "bool":
+            ok = type(item) is bool
+        elif kind == "int":
+            ok = type(item) is int and spec[1] <= item <= spec[2]
+        elif kind == "float":
+            ok = type(item) in (int, float) and math.isfinite(item) and spec[1] <= item <= spec[2]
+        elif kind == "color":
+            ok = isinstance(item, str) and bool(_HEX.match(item))
+        elif kind == "color?":
+            ok = item is None or (isinstance(item, str) and bool(_HEX.match(item)))
+        else:
+            ok = item in spec[1]
+        if not ok:
+            raise ValueError(f"Invalid caption style value for {key}")
+        clean[key] = item
+    return clean
+
+
+def caption_style_for(preset_id: str, overrides=None) -> CaptionStyle:
+    """A preset with the editor's validated overrides applied."""
+    style = get_caption_preset(preset_id)
+    for key, item in validate_caption_overrides(overrides).items():
+        if key == "entrance":
+            style.entrance_pop = item == "pop"
+            style.entrance_fade_ms = 200 if item == "fade" else 0
+        elif key == "exit":
+            style.exit_fade_ms = 200 if item == "fade" else 0
+        elif key == "x":
+            style.x_fraction = float(item)
+        elif key == "font_name":
+            style.font_name = item
+            style.italic = item == "Instrument Serif Italic"
+        else:
+            setattr(style, key, item)
+    if style.font_name == "Instrument Serif Italic":
+        style.bold = False
+    return style

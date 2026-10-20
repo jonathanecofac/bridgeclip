@@ -138,3 +138,107 @@ test('Edit clip opens an Automatic clip in the editor and exports a shorter, val
   assert.equal(await page.locator('#editor-title').inputValue(), 'Second moment')
   assert.deepEqual(errors, [])
 })
+
+test('captions: templates, custom style, saved presets, retimed and added lines, exact preview and export', { timeout: 420000 }, async (t) => {
+  const tools = editorTools(t, { python: true, captions: true })
+  if (!tools) return
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-edit-captions-'))
+  const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, "Mes clips d'été [v2]")
+  const original = path.join(root, 'Vidéos source', 'interview.mp4')
+  video(tools, original, 12)
+  const run = automaticRun(tools, library, 'caption-run', original)
+  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: tools.python, openrouterApiKey: '', zernioApiKey: '' }))
+  const appDir = buildApp(path.join(root, 'app'))
+  linkEngine(appDir)
+  const session = await launchApp({ appDir, userDataDir, env: tools.appEnv })
+  t.after(async () => {
+    const stop = setTimeout(() => session.app.process().kill('SIGTERM'), 5000)
+    try { await session.close() } finally { clearTimeout(stop); fs.rmSync(root, { recursive: true, force: true }) }
+  })
+  const { app, page } = session
+  const shots = process.env.BRIDGECLIP_E2E_SHOTS
+  const errors = []; page.on('pageerror', (e) => errors.push(e.message))
+  page.setDefaultTimeout(20000)
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1500, 1000))
+  const saved = async () => {
+    await page.getByText('All changes saved', { exact: true }).waitFor()
+    return JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'), 'utf8')).candidates[0]
+  }
+  await page.getByRole('button', { name: /^Library/ }).click()
+  await page.getByRole('button', { name: 'Open Interview caption-run', exact: true }).click()
+  await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Why it matters', exact: true }) }).getByRole('button', { name: 'Edit clip', exact: true }).click()
+  await page.getByRole('region', { name: 'Clip editor' }).waitFor({ timeout: 120000 })
+  // Edit clip opens on the Captions tab, with the editor templates first.
+  assert.equal(await page.locator('.editor-tabs').getByRole('button', { name: 'Captions', exact: true }).getAttribute('aria-pressed'), 'true')
+  const templates = page.getByRole('radiogroup', { name: 'Caption style' }).getByRole('radio')
+  assert.deepEqual((await templates.allInnerTexts()).slice(0, 6).map((s) => s.trim().split('\n').pop()), ['Viral Bold', 'Hormozi Style', 'Karaoke', 'Minimal Clean', 'Gaming', 'Cinematic'])
+  await page.getByRole('radio', { name: 'Hormozi Style', exact: true }).click()
+  let candidate = await saved()
+  assert.equal(candidate.caption_preset, 'hormozi'); assert.equal(candidate.caption_style, undefined)
+
+  // Customize: one word at a time, magenta text, a background plate, fade in.
+  const words = page.getByRole('slider', { name: 'Words on screen', exact: true })
+  await words.focus(); await words.press('ArrowLeft'); await words.press('ArrowLeft')
+  await page.getByLabel('Text', { exact: true }).fill('#ff00ff')
+  await page.getByRole('switch', { name: 'Background', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Entrance animation' }).selectOption('fade')
+  candidate = await saved()
+  assert.deepEqual(candidate.caption_style, { max_words_per_line: 1, primary_color: '#FF00FF', line_box_color: '#000000', entrance: 'fade' })
+  await page.getByRole('button', { name: 'Undo', exact: true }).click()
+  assert.equal((await saved()).caption_style.entrance, undefined, 'each change is one undo step')
+  await page.getByRole('button', { name: 'Redo', exact: true }).click()
+
+  // Save the look, switch template, then re-apply the saved look.
+  await page.getByRole('textbox', { name: 'Preset name', exact: true }).fill('Mon style')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.getByRole('button', { name: 'Mon style', exact: true }).waitFor()
+  const stored = JSON.parse(fs.readFileSync(path.join(userDataDir, 'caption-presets.json'), 'utf8'))
+  assert.equal(stored[0].name, 'Mon style'); assert.equal(stored[0].base, 'hormozi'); assert.equal(stored[0].style.primary_color, '#FF00FF')
+  await page.getByRole('radio', { name: 'Cinematic', exact: true }).click()
+  assert.equal((await saved()).caption_preset, 'cinematic')
+  await page.getByRole('button', { name: 'Mon style', exact: true }).click()
+  candidate = await saved()
+  assert.equal(candidate.caption_preset, 'hormozi'); assert.equal(candidate.caption_style.primary_color, '#FF00FF')
+
+  // Transcript: retime the spoken line and add a caption of our own.
+  await page.locator('.editor-tabs').getByRole('button', { name: 'Transcript', exact: true }).click()
+  await page.getByRole('button', { name: 'Edit caption at 0:02.100', exact: true }).click()
+  const start = page.getByRole('textbox', { name: 'Caption start', exact: true })
+  await start.fill('0:02.300'); await start.press('Enter')
+  await page.getByRole('button', { name: 'Done', exact: true }).click()
+  await page.getByRole('button', { name: 'Add at playhead', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Added caption 1', exact: true }).fill('Ajouté à la main')
+  candidate = await saved()
+  assert.deepEqual(candidate.caption_edits.map((e) => [e.segment, e.start_ms, e.end_ms]), [[0, 2300, 5000]])
+  assert.equal(candidate.caption_inserts.length, 1); assert.equal(candidate.caption_inserts[0].text, 'Ajouté à la main')
+  assert.ok(await page.locator('.editor-caption-block.added').count() >= 1, 'added captions show on the caption track')
+
+  // Exact preview renders the export frame at the playhead.
+  await page.getByRole('slider', { name: 'Source timeline', exact: true }).evaluate((el) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '3200')
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await page.getByRole('button', { name: 'Exact preview', exact: true }).click()
+  const still = page.locator('.editor-exact-preview img')
+  await still.waitFor({ timeout: 120000 })
+  const frameFile = decodeURIComponent(new URL(await still.getAttribute('src')).pathname).replace(/^\/([A-Za-z]:)/, '$1')
+  assert.match(path.basename(frameFile), /^editor-frame-[a-f0-9]{32}\.png$/)
+  await page.waitForFunction(() => document.querySelector('.editor-exact-preview img')?.naturalWidth > 0)
+  if (shots) await page.screenshot({ path: path.join(shots, 'edit-captions-exact.png') })
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
+  if (shots) await page.screenshot({ path: path.join(shots, 'edit-captions-live.png') })
+
+  await page.getByRole('button', { name: 'Export clip', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Exported “Why it matters” as a new clip/ }).waitFor({ timeout: 180000 })
+  const exported = JSON.parse(fs.readFileSync(path.join(run, 'job_output.json'), 'utf8')).clips.at(-1)
+  // Magenta caption text is really burned into the export.
+  const ffmpeg = tools.ffmpeg
+  const magenta = (seconds) => {
+    const raw = execFileSync(ffmpeg, ['-v', 'error', '-ss', String(seconds), '-i', exported.s3_url, '-frames:v', '1', '-vf', 'scale=270:480', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'])
+    let count = 0
+    for (let i = 0; i < raw.length; i += 3) if (raw[i] > 200 && raw[i + 1] < 80 && raw[i + 2] > 200) count++
+    return count
+  }
+  assert.ok(Math.max(magenta(1), magenta(1.6), magenta(2.2)) > 50, 'custom caption color in the exported MP4')
+  assert.deepEqual(errors, [])
+})

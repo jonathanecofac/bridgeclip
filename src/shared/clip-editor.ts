@@ -1,3 +1,5 @@
+import { parseCaptionStyle, type CaptionStyleOverrides } from './caption-style'
+
 /** Persisted source-time edits. Media paths and review results are main-process owned. */
 export type Crop = [number, number, number, number]
 export type CropCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
@@ -24,7 +26,8 @@ export interface CandidateEdit {
   id: string; title: string; ranges: EditorRange[]; scenes: EditorScene[]
   captions: boolean; caption_preset: string; video_speed: number
   status: 'refining' | 'ready' | 'baked' | 'discarded'
-  caption_edits: { segment: number; text: string }[]
+  /** Per transcript line: corrected text and, optionally, new source-time timing. */
+  caption_edits: CaptionEdit[]
   /** Source-time intervals where our burned-in captions are hidden. */
   caption_suppression_ranges: EditorRange[]
   /** Caption block center, as a fraction of output height. Null uses layout placement. */
@@ -32,7 +35,13 @@ export interface CandidateEdit {
   dismissed_camera_markers?: number[]
   /** Draw the clip title as a card at the top, like Automatic renders. Absent is off. */
   title_card?: boolean
+  /** Caption look on top of `caption_preset` (fonts, colors, words per line, animation, position). */
+  caption_style?: CaptionStyleOverrides
+  /** Captions added by hand, in source time. */
+  caption_inserts?: CaptionInsert[]
 }
+export interface CaptionEdit { segment: number; text: string; start_ms?: number; end_ms?: number }
+export interface CaptionInsert { start_ms: number; end_ms: number; text: string }
 export interface EditorCandidate extends CandidateEdit {
   camera_scan?: CameraScan
   requires_visual_context?: boolean; score: number; reason: string; review: EditorReview | null; exports: number[]
@@ -50,10 +59,11 @@ export interface EditorProject {
   /** Source and preview were deleted to save space; the project is read-only. */
   media_freed?: boolean
   aspect_ratio: '9:16' | '16:9'; candidates: EditorCandidate[]
-  transcript: { start_ms: number; end_ms: number; text: string }[]
+  /** Spoken lines; `words` gives each word's [start, end] when it matches the text one to one. */
+  transcript: { start_ms: number; end_ms: number; text: string; words?: [number, number][] }[]
 }
 export interface EditorProgress { phase: 'scan' | 'preview' | 'source'; percent: number }
-export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | 'create-project'
+export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | 'create-project' | 'preview-frame'
 export interface EditorBatch { completed: number; total: number; failed?: number }
 export interface EditorSession {
   progress?: EditorProgress; project: EditorProject; sourcePath: string; previewPath: string
@@ -102,6 +112,12 @@ const common: Partial<Record<EditorErrorCode, string>> = {
 }
 /** A user-facing message for a failed editor worker. Only render setup problems point to System check. */
 export function editorFailureMessage(action: Exclude<EditorOperation, 'save'>, code?: EditorErrorCode): string {
+  if (action === 'preview-frame') {
+    return code === 'invalid_edit' ? 'Move the playhead inside the clip, then render the exact preview again.'
+      : code === 'cancelled' ? 'Exact preview cancelled.'
+      : code && common[code] ? common[code]!
+      : `Could not render the exact preview. Your edits are saved. ${logs}`
+  }
   if (action === 'create-project') {
     return code === 'duration' ? `${EDITOR_SOURCE_UNAVAILABLE} The selected video has a different duration than the one these clips came from. Choose the original video.`
       : code === 'invalid' || code === 'source_incompatible' ? `${EDITOR_SOURCE_UNAVAILABLE} FFmpeg could not read the selected video. Choose the original, playable video file.`
@@ -190,12 +206,25 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
   const status = v.status === undefined ? 'refining' : v.status
   if (!['refining', 'ready', 'baked', 'discarded'].includes(status as string)) fail()
   const seen = new Set<number>()
-  const caption_edits = arr(v.caption_edits === undefined ? [] : v.caption_edits, 2000).map((item) => {
+  const control = (text: string): boolean => [...text].some((char) => char.charCodeAt(0) < 32 && !'\t\n\r'.includes(char))
+  const caption_edits = arr(v.caption_edits === undefined ? [] : v.caption_edits, 2000).map((item): CaptionEdit => {
     const edit = record(item), segment = num(edit.segment, 0, transcriptCount - 1), text = str(edit.text, 2000)
-    if (!Number.isInteger(segment) || seen.has(segment) || [...text].some((char) => char.charCodeAt(0) < 32 && !'\t\n\r'.includes(char))) fail()
+    if (!Number.isInteger(segment) || seen.has(segment) || control(text)) fail()
     seen.add(segment)
-    return { segment, text }
+    if ((edit.start_ms === undefined) !== (edit.end_ms === undefined)) fail()
+    if (edit.start_ms === undefined) return { segment, text }
+    const start_ms = Math.round(num(edit.start_ms, 0, duration)), end_ms = Math.round(num(edit.end_ms, 0, duration))
+    if (end_ms - start_ms < 100) fail()
+    return { segment, text, start_ms, end_ms }
   }).sort((a, b) => a.segment - b.segment)
+  const caption_inserts = v.caption_inserts === undefined ? undefined : arr(v.caption_inserts, 200).map((item): CaptionInsert => {
+    const x = record(item), text = str(x.text, 500)
+    const start_ms = Math.round(num(x.start_ms, 0, duration)), end_ms = Math.round(num(x.end_ms, 0, duration))
+    if (!text.trim() || control(text) || end_ms - start_ms < 100) fail()
+    return { start_ms, end_ms, text }
+  }).sort((a, b) => a.start_ms - b.start_ms)
+  let caption_style: CaptionStyleOverrides | undefined
+  if (v.caption_style !== undefined) { try { caption_style = parseCaptionStyle(v.caption_style) } catch { fail() } }
   const caption_suppression_ranges = arr(v.caption_suppression_ranges === undefined ? [] : v.caption_suppression_ranges, 200).map((r) => {
     const a = arr(r, 2); if (a.length !== 2) fail()
     return [Math.round(num(a[0], 0, duration)), Math.round(num(a[1], 0, duration))] as EditorRange
@@ -205,6 +234,7 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
     status: status as CandidateEdit['status'], caption_edits, caption_suppression_ranges,
     caption_y: v.caption_y == null ? null : num(v.caption_y, .1, .9),
     ...(v.title_card === undefined ? {} : { title_card: typeof v.title_card === 'boolean' ? v.title_card : fail() }),
+    ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}),
     ...(v.dismissed_camera_markers === undefined ? {} : { dismissed_camera_markers: [...new Set(arr(v.dismissed_camera_markers, 5000).map((t) => num(t, 0, duration)))].sort((a, b) => a - b) }) }
 }
 function question(value: unknown): EditorQuestion {
@@ -218,7 +248,14 @@ export function parseEditorProject(value: unknown): EditorProject {
   if (v.preview_id !== undefined && (typeof v.preview_id !== 'string' || !/^[a-f0-9]{32}$/.test(v.preview_id))) fail()
   if (v.version !== 1 || !['9:16', '16:9'].includes(v.aspect_ratio as string)) fail()
   const duration = num(v.duration_ms, 100, 24 * 3600000)
-  const transcript = arr(v.transcript, 100000).map((row) => { const t = record(row); return { start_ms: num(t.start_ms, 0, duration), end_ms: num(t.end_ms, 0, duration), text: clampText(t.text, 20000) } })
+  const transcript = arr(v.transcript, 100000).map((row) => {
+    const t = record(row), line = { start_ms: num(t.start_ms, 0, duration), end_ms: num(t.end_ms, 0, duration), text: clampText(t.text, 20000) }
+    if (t.words === undefined) return line
+    // Word timing is a preview aid: drop it rather than reject the project when it does not fit.
+    const words = Array.isArray(t.words) && t.words.length <= 2000 && t.words.every((w) => Array.isArray(w) && w.length === 2 && w.every((n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= duration))
+      ? t.words as [number, number][] : null
+    return words && words.length === line.text.split(/\s+/).filter(Boolean).length ? { ...line, words } : line
+  })
   const ids = new Set<string>()
   const candidates = arr(v.candidates, 100).map((item): EditorCandidate => {
     const c = record(item), edit = parseCandidateEdit(c, duration, transcript.length)
@@ -254,8 +291,9 @@ export function parseEditorProject(value: unknown): EditorProject {
     transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }
 export function candidateEdit(c: CandidateEdit): CandidateEdit {
-  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card } = c
-  return { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges, caption_y: c.caption_y ?? null, ...(dismissed_camera_markers ? { dismissed_camera_markers } : {}), ...(title_card !== undefined ? { title_card } : {}) }
+  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card, caption_style, caption_inserts } = c
+  return { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges, caption_y: c.caption_y ?? null, ...(dismissed_camera_markers ? { dismissed_camera_markers } : {}), ...(title_card !== undefined ? { title_card } : {}),
+    ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}) }
 }
 export function renderEditKey(c: CandidateEdit): string {
   return JSON.stringify({ ...candidateEdit(c), status: undefined, dismissed_camera_markers: undefined })

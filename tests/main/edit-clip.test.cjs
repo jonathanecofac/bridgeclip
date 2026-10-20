@@ -165,3 +165,24 @@ test('the recorded source must be a local regular video file', () => {
     }
   } finally { f.cleanup() }
 })
+
+test('clearing caption overrides, added captions or the title card removes them from the saved project', async () => {
+  const f = setup()
+  try {
+    const pending = f.main.createEditorProject(f.run)
+    ;(await nextWorker(f.workers)).finish()
+    const session = await pending
+    const edits = session.project.candidates
+    Object.assign(edits[0], { status: 'refining', caption_style: { font_size: 120, x: .3 }, caption_inserts: [{ start_ms: 1000, end_ms: 2000, text: 'Hello' }], title_card: true,
+      caption_edits: [{ segment: 0, text: 'Retimed', start_ms: 500, end_ms: 1500 }] })
+    let saved = await f.main.saveEditor(f.run, session.project.revision, edits)
+    assert.deepEqual(saved.project.candidates[0].caption_style, { font_size: 120, x: .3 })
+    assert.deepEqual(saved.project.candidates[0].caption_edits, [{ segment: 0, text: 'Retimed', start_ms: 500, end_ms: 1500 }])
+    for (const key of ['caption_style', 'caption_inserts', 'title_card']) delete edits[0][key]
+    edits[0].caption_style = {}; edits[0].caption_inserts = []
+    saved = await f.main.saveEditor(f.run, saved.project.revision, edits)
+    for (const key of ['caption_style', 'caption_inserts', 'title_card']) assert.equal(key in saved.project.candidates[0], false, key)
+    edits[0].caption_style = { font_name: 'Comic Sans' }
+    await assert.rejects(f.main.saveEditor(f.run, saved.project.revision, edits), /Invalid/)
+  } finally { f.cleanup() }
+})
