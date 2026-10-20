@@ -1,6 +1,7 @@
 import { SavedStageTimings } from './StageBreakdown'
 import { parseJobOutput } from '../../shared/job-output'
-import { editorProgress } from '../../shared/clip-editor'
+import { candidateForClip, editorProgress, type EditorSession } from '../../shared/clip-editor'
+import { EditClipPreparation } from './EditClipPreparation'
 import { ClipEditor } from './ClipEditor'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Check, ChevronDown, Clapperboard, Download, FolderOpen, ListPlus, Plus, Scissors, Search, Send, Trash2, Youtube } from 'lucide-react'
@@ -58,14 +59,40 @@ export function ClipList(props: ClipListProps): React.JSX.Element {
 }
 
 function ClipRun(props: ClipListProps): React.JSX.Element {
-  const hasEditor = props.output.editor_project === true && !!props.outputDir
+  // The landing view is chosen once from the run as opened; "Edit clip" can make it editable later.
+  const openedWithEditor = props.output.editor_project === true && !!props.outputDir
   const [editing, setEditing] = useState(false)
-  const [opening, setOpening] = useState(hasEditor)
+  const [opening, setOpening] = useState(openedWithEditor)
   const [remaining, setRemaining] = useState<number | null>(null)
   const [editorError, setEditorError] = useState<string | null>(null)
   const [output, setOutput] = useState(props.output)
+  const hasEditor = output.editor_project === true && !!props.outputDir
+  /** Candidate the editor opens on, from the clip whose "Edit clip" was pressed. */
+  const [target, setTarget] = useState<string | null>(null)
+  const [preparing, setPreparing] = useState<ClipArtifact | null>(null)
+  const closePreparation = useCallback(() => setPreparing(null), [])
+  const editClip = async (clip: ClipArtifact): Promise<void> => {
+    setEditorError(null)
+    if (!props.outputDir) return
+    if (!hasEditor) { setPreparing(clip); return }
+    try {
+      const session = await getApi().editor.open(props.outputDir)
+      setTarget(candidateForClip(session.project.candidates, clip))
+      setEditing(true)
+    } catch (cause) { setEditorError(errorMessage(cause, 'Could not open the editor. Try again.')) }
+  }
+  const prepared = useCallback(async (session: EditorSession, clip: ClipArtifact) => {
+    setPreparing(null)
+    try {
+      const fresh = parseJobOutput(await getApi().history.getJob(props.outputDir!))
+      if (fresh) setOutput(fresh)
+    } catch { /* The editor is open; the list refreshes when it closes. */ }
+    setRemaining(editorProgress(session.project.candidates).remaining)
+    setTarget(candidateForClip(session.project.candidates, clip))
+    setEditing(true)
+  }, [props.outputDir])
   useEffect(() => {
-    if (!hasEditor) return
+    if (!openedWithEditor) return
     let active = true
     void getApi().editor.open(props.outputDir!).then((session) => {
       if (!active) return
@@ -77,25 +104,33 @@ function ClipRun(props: ClipListProps): React.JSX.Element {
     }).finally(() => { if (active) setOpening(false) })
     return () => { active = false }
   // Choose the landing view once per run, without interrupting active edits.
-  }, [hasEditor, props.outputDir])
+  }, [openedWithEditor, props.outputDir])
   if (opening) return <Page width="wide">{props.leading}<p className="mt-4 text-sm text-ink-muted" role="status">Opening clips…</p></Page>
-  if (editing && props.outputDir) return <ClipEditor outputDir={props.outputDir} leading={props.leading} onExports={async () => {
+  const backToClips = async (): Promise<void> => {
     const [raw, session] = await Promise.all([getApi().history.getJob(props.outputDir!), getApi().editor.open(props.outputDir!)])
     const fresh = parseJobOutput(raw)
     if (!fresh) throw new Error('Could not load the exported clips. Reopen this Library item to retry.')
     setOutput(fresh); setRemaining(editorProgress(session.project.candidates).remaining)
-    setEditorError(null); setEditing(false)
-  }} />
-  return <GeneratedClipList {...props} output={output} onOutputChanged={(fresh) => {
+    setEditorError(null); setEditing(false); setTarget(null)
+  }
+  if (editing && props.outputDir) return <ClipEditor outputDir={props.outputDir} initialCandidateId={target}
+    leading={target ? <BackLink label="Back to clips" onClick={() => { void backToClips().catch((cause) => setEditorError(errorMessage(cause))) }} /> : props.leading}
+    onExports={backToClips} />
+  return <>{preparing && props.outputDir && <EditClipPreparation outputDir={props.outputDir} clipTitle={preparing.summary || `Clip ${preparing.clip_index + 1}`}
+    onClose={closePreparation} onReady={(session) => { void prepared(session, preparing) }} />}
+  <GeneratedClipList {...props} output={output} onEditClip={props.outputDir ? (clip) => { void editClip(clip) } : undefined} onOutputChanged={(fresh) => {
     setOutput(fresh)
     if (hasEditor) void getApi().editor.open(props.outputDir!).then((session) => setRemaining(editorProgress(session.project.candidates).remaining))
       .catch((cause) => setEditorError(errorMessage(cause)))
-  }} editor={hasEditor ? { remaining, error: editorError, onOpen: () => setEditing(true) } : undefined} />
+  }} editor={hasEditor ? { remaining, error: editorError, onOpen: () => { setTarget(null); setEditing(true) } } : undefined} editError={hasEditor ? null : editorError} />
+  </>
 }
 
-function GeneratedClipList({ output, outputDir: runDirectory, leading, onNewClip, onNavigate, initialClipIndex, editor, onOutputChanged }: ClipListProps & {
+function GeneratedClipList({ output, outputDir: runDirectory, leading, onNewClip, onNavigate, initialClipIndex, editor, onOutputChanged, onEditClip, editError }: ClipListProps & {
   editor?: { remaining: number | null; error: string | null; onOpen: () => void }
   onOutputChanged: (output: JobOutput) => void
+  onEditClip?: (clip: ClipArtifact) => void
+  editError?: string | null
 }): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [focusedClip, setFocusedClip] = useState(initialClipIndex)
@@ -297,6 +332,7 @@ function GeneratedClipList({ output, outputDir: runDirectory, leading, onNewClip
               onPost={() => setPosting([asPostable(clip)])}
               onAddToAutomation={outputDir ? () => setBankClips([clip.clip_index]) : undefined}
               onDelete={outputDir ? () => confirmDelete([clip.clip_index]) : undefined}
+              onEdit={onEditClip ? () => onEditClip(clip) : undefined}
               actionsDisabled={deleting || exporting}
               onSetPosted={outputDir ? async (posted) => {
                 if (!getApi().history.setPosted) throw new Error('Restart BridgeClip to enable manual posted marks.')
@@ -339,7 +375,7 @@ function GeneratedClipList({ output, outputDir: runDirectory, leading, onNewClip
         }
       />
 
-      {editor?.error && <Callout tone="warning" className="mt-3">{editor.error}</Callout>}
+      {(editor?.error || editError) && <Callout tone="warning" className="mt-3">{editor?.error || editError}</Callout>}
 
       {typeof videoSpeed === 'number' && videoSpeed > 1 && (
         <p className="mt-3 text-xs text-ink-muted">All clips exported at {videoSpeed}× speed · Original voice pitch</p>

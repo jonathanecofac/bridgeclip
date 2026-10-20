@@ -1,5 +1,5 @@
 import { openEditor, saveEditor, runEditor, cancelEditor, replaceEditorSource } from './clip-editor'
-import { editorCloseReady, freeEditorMedia, readEditorProgress } from './clip-editor'
+import { editorCloseReady, freeEditorMedia, readEditorProgress, createEditorProject, readEditorOperation } from './clip-editor'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
@@ -204,6 +204,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('editor:progress', (_event, path: unknown) => readEditorProgress(path))
   handle('editor:freeMedia', (_event, path: unknown, revision: unknown) => freeEditorMedia(path, revision))
   handle('editor:closeReady', (_event, saved: unknown) => editorCloseReady(saved))
+  handle('editor:create', (_event, path: unknown, source: unknown) => createEditorProject(path, source))
+  handle('editor:operation', (_event, path: unknown) => readEditorOperation(path))
 
   handle('edits:inspect', (_event, outputDir: string) => inspectEdits(outputDir, loadSettings().outputDirectory))
 

@@ -964,6 +964,7 @@ class AIClippingPipeline:
                     "pacing": request.pacing,
                     "video_speed": request.video_speed,
                     "include_title": request.include_title,
+                    "caption_preset": request.caption_preset,
                     "clip_request": request.clip_request,
                 },
                 "transcription_status": transcription_status,

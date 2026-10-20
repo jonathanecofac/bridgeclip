@@ -278,6 +278,217 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
     return project
 
 
+# ---------------------------------------------------------------------------
+# Editable projects for Automatic runs ("Edit clip" on a generated clip)
+# ---------------------------------------------------------------------------
+
+# Automatic renders pad each AI interval by the engine's audio padding unless
+# Jev reviewed exact source intervals (see ai_clipping_pipeline.render_clip_locked).
+AUTOMATIC_PADDING_MS = 150
+CAPTION_PRESET_ID = re.compile(r'^[a-z0-9_-]{1,64}$')
+
+
+def _finite(value, lo=None, hi=None):
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return False
+    return (lo is None or value >= lo) and (hi is None or value <= hi)
+
+
+def _subtract(a, b, holes):
+    """[a, b] minus each hole, keeping pieces of at least 100 ms, in order."""
+    pieces = [[a, b]]
+    for hole in holes or []:
+        if not isinstance(hole, (list, tuple)) or len(hole) != 2 or not all(_finite(n) for n in hole):
+            continue
+        h0, h1 = round(hole[0]), round(hole[1])
+        if h1 <= h0:
+            continue
+        next_pieces = []
+        for p0, p1 in pieces:
+            if h1 <= p0 or h0 >= p1:
+                next_pieces.append([p0, p1])
+                continue
+            if h0 - p0 >= 100:
+                next_pieces.append([p0, h0])
+            if p1 - h1 >= 100:
+                next_pieces.append([h1, p1])
+        pieces = next_pieces
+    return pieces
+
+
+def _box(value):
+    if isinstance(value, (list, tuple)) and len(value) == 4 and all(_finite(n, 0, 1) for n in value):
+        return [float(n) for n in value]
+    return None
+
+
+def _centered_crop(w, h, aspect, box):
+    """A crop of the output aspect centered on a normalized [x, y, w, h] box."""
+    cw, ch = min(1, h * aspect / w), min(1, w / aspect / h)
+    cx, cy = (box[0] + box[2] / 2, box[1] + box[3] / 2) if box else (.5, .5)
+    return [max(0, min(1 - cw, cx - cw / 2)), max(0, min(1 - ch, cy - ch / 2)), cw, ch]
+
+
+def _shot_scene(shot, w, h, aspect, layout_style):
+    """Translate an Automatic render's dominant framing into an editable layout.
+
+    The editor draws crops, not the renderer's motion paths, so each shot uses
+    a fixed crop centered on what the renderer followed. Users refine it.
+    """
+    if layout_style == 'fit':
+        return 'fit', [_centered_crop(w, h, aspect, None)]
+    kind = shot.get('layout') if isinstance(shot, dict) else None
+    people = [p for p in (_box(p) for p in (shot.get('people') or [])) if p] if isinstance(shot, dict) else []
+    if kind == 'screen':
+        return 'fit', [_centered_crop(w, h, aspect, None)]
+    if kind == 'two_shot' and len(people) >= 2:
+        left, right = sorted(people[:2], key=lambda b: b[0] + b[2] / 2)
+        return 'split', [_centered_crop(w, h, aspect * 2, left), _centered_crop(w, h, aspect * 2, right)]
+    if kind == 'screen_cam' and _box(shot.get('cam_box')):
+        screen = _box(shot.get('screen_focus')) or _box(shot.get('screen_box'))
+        return 'split', [_centered_crop(w, h, aspect * 2, screen), _centered_crop(w, h, aspect * 2, _box(shot.get('cam_box')))]
+    return 'fill', [_centered_crop(w, h, aspect, people[0] if people else _box(shot.get('content_box')) if isinstance(shot, dict) else None)]
+
+
+def automatic_candidates(output, plan, width, height, duration_ms):
+    """Editable candidates for every clip an Automatic run rendered.
+
+    Each candidate keeps the clip's AI interval (with the same padding and
+    planner skips the render used), its framing, captions and title card, and
+    starts Baked: the existing clip file is its first export. Editing creates a
+    new export and never overwrites the original.
+    """
+    metrics = output.get('metrics') if isinstance(output.get('metrics'), dict) else {}
+    requested = metrics.get('requested_settings') if isinstance(metrics.get('requested_settings'), dict) else {}
+    aspect_ratio = requested.get('aspect_ratio') if requested.get('aspect_ratio') in ('9:16', '16:9') else '9:16'
+    aspect = 9 / 16 if aspect_ratio == '9:16' else 16 / 9
+    layout_style = requested.get('layout_style')
+    preset = requested.get('caption_preset')
+    preset = preset if isinstance(preset, str) and CAPTION_PRESET_ID.match(preset) else 'pop'
+    speed = requested.get('video_speed')
+    speed = float(speed) if _finite(speed, 1, 2) else 1
+    captions = metrics.get('captions_status', 'enabled') == 'enabled'
+    title_card = requested.get('include_title', True) is not False
+    layouts = {item.get('clip_index'): item for item in (metrics.get('clip_layouts') or []) if isinstance(item, dict)}
+    segments = plan.get('segments') if isinstance(plan, dict) and isinstance(plan.get('segments'), list) else []
+    candidates = []
+    clips = sorted((c for c in output.get('clips', []) if isinstance(c, dict) and type(c.get('clip_index')) is int),
+                   key=lambda c: c['clip_index'])
+    for clip in clips[:100]:
+        index = clip['clip_index']
+        if clip.get('editor_candidate') or not 0 <= index <= 999:
+            continue  # Exports of an existing editor project are not new candidates.
+        start, end = clip.get('start_time_ms'), clip.get('end_time_ms')
+        if not _finite(start, 0) or not _finite(end, start + 100):
+            continue
+        segment = segments[index] if index < len(segments) and isinstance(segments[index], dict) else {}
+        if segment and (segment.get('start_time_ms') != start or segment.get('end_time_ms') != end):
+            segment = {}  # The plan changed after rendering; keep only the clip's own interval.
+        pad = 0 if clip.get('editorial') else AUTOMATIC_PADDING_MS
+        a, b = max(0, round(start) - pad), min(duration_ms, round(end) + pad)
+        if b - a < 100:
+            continue
+        ranges = _subtract(a, b, segment.get('skip_ranges_ms'))
+        if not ranges or len(ranges) > 24:
+            ranges = [[a, b]]
+        scenes = []
+        if aspect_ratio == '9:16':
+            for shot in (layouts.get(index) or {}).get('shots') or []:
+                if not isinstance(shot, dict) or not _finite(shot.get('start_ms'), 0):
+                    continue
+                at = 0 if not scenes else a + round(shot['start_ms'])
+                if scenes and (at <= scenes[-1]['at_ms'] or at >= b):
+                    continue
+                layout, crops = _shot_scene(shot, width, height, aspect, layout_style)
+                if scenes and scenes[-1]['layout'] == layout and scenes[-1]['crops'] == crops:
+                    continue
+                scenes.append({'at_ms': at, 'layout': layout, 'crops': crops})
+                if len(scenes) >= 60:
+                    break
+        if not scenes:
+            layout = 'fit' if layout_style == 'fit' or (aspect_ratio == '16:9' and width < height) else 'fill'
+            scenes = [{'at_ms': 0, 'layout': layout, 'crops': [_centered_crop(width, height, aspect, None)]}]
+        # Same scale as the clip (Automatic and review runs both store the planner's 0-1 score).
+        score = clip.get('virality_score') if _finite(clip.get('virality_score'), 0) else 0
+        reason = segment.get('reasoning') if isinstance(segment.get('reasoning'), str) else ''
+        candidate = {'id': f'clip-{index:02d}', 'title': utf16_prefix((clip.get('summary') or '').strip() or f'Clip {index + 1}', 200),
+            'ranges': ranges, 'scenes': scenes, 'score': max(0, min(100, score)), 'reason': utf16_prefix(reason, 4000),
+            'requires_visual_context': False, 'captions': captions, 'caption_preset': preset, 'video_speed': speed,
+            'exports': [index], 'review': None, 'status': 'baked', 'caption_edits': [], 'caption_suppression_ranges': [],
+            'source_clip': index, 'title_card': title_card}
+        try:
+            validate_candidate(candidate, duration_ms)
+        except (ValueError, KeyError, TypeError):
+            candidate['scenes'] = [{'at_ms': 0, 'layout': 'fill', 'crops': [_centered_crop(width, height, aspect, None)]}]
+            candidate['ranges'] = [[a, b]]
+            validate_candidate(candidate, duration_ms)
+        candidates.append(candidate)
+    return aspect_ratio, candidates
+
+
+async def create_project(run, progress=None):
+    """Turn an Automatic run into an editor project around `editor-source.mp4`.
+
+    Main links or copies the original video into the run first. This checks
+    that it is the same video, prepares the frame-accurate preview, then
+    commits editor-project.json and flags job_output.json, in that order.
+    """
+    output = read_json(run, 'job_output.json')
+    if (run / 'editor-project.json').exists():
+        project = read_json(run, 'editor-project.json')
+        if not output.get('editor_project'):
+            output['editor_project'] = True
+            atomic_json(run / 'job_output.json', output)
+        return project
+    with failure_code('source_missing'):
+        source = local_file(run, media_name('source'))
+    try:
+        info = await asyncio.to_thread(source_info, source)
+    except SourceReplacementError as error:
+        raise EditorError('invalid', 'The source video could not be read') from error
+    expected = output.get('source_video_duration_seconds')
+    if _finite(expected, .1) and abs(info['duration'] - expected * 1000) > max(1000, expected * 10):
+        raise EditorError('duration', 'This is not the video these clips came from')
+    with failure_code('engine_unavailable'):
+        renderer = RenderingService()
+    with failure_code('source_incompatible'):
+        width, height = await renderer._get_video_dimensions(str(source))
+    duration = round(info['duration'])
+    plan = {}
+    try:
+        plan = read_json(run, 'plan.json')
+    except (ValueError, OSError):
+        pass
+    aspect_ratio, candidates = automatic_candidates(output, plan, width, height, duration)
+    if not candidates:
+        raise EditorError('invalid_edit', 'This run has no clips to edit')
+    transcript = []
+    try:
+        rows = read_json(run, 'transcript.json').get('segments') or []
+        for row in rows[:100000]:
+            if isinstance(row, dict) and _finite(row.get('start_time_ms'), 0) and _finite(row.get('end_time_ms'), 0):
+                transcript.append({'start_ms': max(0, min(duration, round(row['start_time_ms']))),
+                    'end_ms': max(0, min(duration, round(row['end_time_ms']))), 'text': utf16_prefix(str(row.get('text') or ''), 20000)})
+    except (ValueError, OSError, AttributeError):
+        transcript = []
+    preview = run / media_name('preview')
+    preview.unlink(missing_ok=True)
+    try:
+        with failure_code('render_failed'):
+            await renderer.capture_framing_source(str(source), str(preview), duration_ms=duration,
+                progress=(lambda percent: progress({'phase': 'preview', 'percent': max(0, min(100, percent))})) if progress else None)
+        project = {'version': 1, 'revision': 0, 'title': utf16_prefix(output.get('source_video_title') or '', 1024),
+            'width': width, 'height': height, 'duration_ms': duration, 'aspect_ratio': aspect_ratio,
+            'candidates': candidates, 'transcript': transcript, 'frame_preview': True}
+        atomic_json(run / 'editor-project.json', project)
+    except BaseException:
+        preview.unlink(missing_ok=True)
+        raise
+    output['editor_project'] = True
+    atomic_json(run / 'job_output.json', output)
+    return project
+
+
 def atomic_json(path, value):
     temp = None
     try:
@@ -343,6 +554,10 @@ def validate_candidate(c, duration, transcript_count=100000):
         raise ValueError('Invalid caption position')
     if c.get('status', 'refining') not in ('refining', 'ready', 'baked', 'discarded'):
         raise ValueError('Invalid clip status')
+    if 'title_card' in c and type(c['title_card']) is not bool:
+        raise ValueError('Invalid title card setting')
+    if 'source_clip' in c and (type(c['source_clip']) is not int or not 0 <= c['source_clip'] <= 999):
+        raise ValueError('Invalid source clip')
     suppressed = c.get('caption_suppression_ranges', [])
     if not isinstance(suppressed, list) or len(suppressed) > 200:
         raise ValueError('Invalid caption suppression ranges')
@@ -440,6 +655,9 @@ async def run_editor(config, progress=None):
     run = raw_run.resolve(strict=True)
     if raw_run.is_symlink() or ('library' in config and run.parent != Path(config['library']).resolve(strict=True)):
         raise ValueError('Editor project is outside the library')
+    if config['action'] == 'create-project':
+        await create_project(run, progress)
+        return
     project = read_json(run, 'editor-project.json')
     if project['version'] != 1 or project['revision'] != config['revision']:
         raise EditorError('project_changed', 'The editor project changed. Reopen it and retry.')
@@ -555,6 +773,7 @@ async def export_clip(run, project, c, output, source, transcript):
         result = await renderer.render_clip(RenderRequest(video_path=source, output_path=str(Path(work) / 'clip.mp4'),
             start_time_ms=a, end_time_ms=b, source_width=project['width'], source_height=project['height'],
             transcript_segments=render_transcript, include_captions=c['captions'], caption_style=get_caption_preset(c['caption_preset']),
+            title_text=c['title'], include_title=c.get('title_card') is True,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
             caption_y=c.get('caption_y'),
             apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
@@ -563,7 +782,8 @@ async def export_clip(run, project, c, output, source, transcript):
     output['clips'].append({'clip_index': index, 's3_url': str(path), 'duration_ms': result.duration_ms,
         'start_time_ms': a, 'end_time_ms': b, 'virality_score': c['score'], 'layout_type': result.layout_type,
         'summary': c['title'], 'tags': [], 'render_fallback': None,
-        'editor_candidate': c['id'], 'editor_revision': project['revision']})
+        'editor_candidate': c['id'], 'editor_revision': project['revision'],
+        **({'edited_from_clip': c['source_clip']} if type(c.get('source_clip')) is int else {})})
     output['total_clips'] = len(output['clips'])
     atomic_json(run / 'job_output.json', output)
     return index

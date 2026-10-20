@@ -15,6 +15,10 @@ export interface ClipArtifact {
   tags: string[]
   /** Set when smart framing failed and a letterbox fallback produced the clip. */
   render_fallback: string | null
+  /** Editor candidate that rendered this clip, when the clip editor exported it. */
+  editor_candidate?: string
+  /** Library clip this export was edited from; the original stays in the run. */
+  edited_from_clip?: number
 }
 
 export interface JobOutput {
@@ -181,7 +185,9 @@ export function parseJobOutput(value: unknown): JobOutput | null {
       layout_type: typeof item.layout_type === 'string' && ['talking_head', 'two_shot', 'screen_cam', 'screen', 'fit', 'center_crop'].includes(item.layout_type) ? item.layout_type : '',
       summary: boundedText(item.summary, 2048),
       tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 50).map((tag) => tag.slice(0, 64)) : [],
-      render_fallback: boundedText(item.render_fallback, 256)
+      render_fallback: boundedText(item.render_fallback, 256),
+      ...(typeof item.editor_candidate === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(item.editor_candidate) ? { editor_candidate: item.editor_candidate } : {}),
+      ...(Number.isSafeInteger(item.edited_from_clip) && (item.edited_from_clip as number) >= 0 ? { edited_from_clip: item.edited_from_clip as number } : {})
     })
   }
   return {

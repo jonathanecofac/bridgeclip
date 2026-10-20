@@ -30,12 +30,16 @@ export interface CandidateEdit {
   /** Caption block center, as a fraction of output height. Null uses layout placement. */
   caption_y?: number | null
   dismissed_camera_markers?: number[]
+  /** Draw the clip title as a card at the top, like Automatic renders. Absent is off. */
+  title_card?: boolean
 }
 export interface EditorCandidate extends CandidateEdit {
   camera_scan?: CameraScan
   requires_visual_context?: boolean; score: number; reason: string; review: EditorReview | null; exports: number[]
   /** Main-owned: SHA-256 of the last baked render identity, so undoing "Refine again" can restore Baked. */
   baked_hash?: string
+  /** Library clip this candidate was created from ("Edit clip" on an Automatic run). Never changed by edits. */
+  source_clip?: number
 }
 export interface EditorProject {
   version: 1; revision: number; title: string; duration_ms: number; width: number; height: number
@@ -48,8 +52,8 @@ export interface EditorProject {
   aspect_ratio: '9:16' | '16:9'; candidates: EditorCandidate[]
   transcript: { start_ms: number; end_ms: number; text: string }[]
 }
-export interface EditorProgress { phase: 'scan' | 'preview'; percent: number }
-export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras'
+export interface EditorProgress { phase: 'scan' | 'preview' | 'source'; percent: number }
+export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | 'create-project'
 export interface EditorBatch { completed: number; total: number; failed?: number }
 export interface EditorSession {
   progress?: EditorProgress; project: EditorProject; sourcePath: string; previewPath: string
@@ -66,6 +70,11 @@ export interface EditorProgressSummary {
   operation: EditorOperation | null; batch?: EditorBatch; progress?: EditorProgress
 }
 
+/**
+ * "Edit clip" could not find the video an Automatic run was made from. The
+ * Library offers "Locate original video" for it; the prefix is stable for matching.
+ */
+export const EDITOR_SOURCE_UNAVAILABLE = 'Original video not found.'
 /** Main's stale-revision save error. The editor offers "Reload project" for it. */
 export const EDITOR_REVISION_CONFLICT = 'This project changed. Reopen it before saving.'
 /** Fixed worker failure codes (see bridge/editor_runner.py); no tool output crosses the bridge. */
@@ -93,6 +102,16 @@ const common: Partial<Record<EditorErrorCode, string>> = {
 }
 /** A user-facing message for a failed editor worker. Only render setup problems point to System check. */
 export function editorFailureMessage(action: Exclude<EditorOperation, 'save'>, code?: EditorErrorCode): string {
+  if (action === 'create-project') {
+    return code === 'duration' ? `${EDITOR_SOURCE_UNAVAILABLE} The selected video has a different duration than the one these clips came from. Choose the original video.`
+      : code === 'invalid' || code === 'source_incompatible' ? `${EDITOR_SOURCE_UNAVAILABLE} FFmpeg could not read the selected video. Choose the original, playable video file.`
+      : code === 'source_missing' ? `${EDITOR_SOURCE_UNAVAILABLE} Choose the video these clips came from.`
+      : code === 'invalid_edit' ? 'This run has no clips that can be edited.'
+      : code === 'cancelled' ? 'Preparing the editor was cancelled. Your clips are unchanged.'
+      : code === 'timeout' ? 'Preparing the editor took too long and was stopped. Your clips are unchanged.'
+      : code === 'engine_unavailable' ? common.engine_unavailable!
+      : `Could not prepare this run for editing. Your clips are unchanged. ${logs}`
+  }
   if (action === 'replace-source') {
     if (code && Object.hasOwn(sourceReplacementErrors, code)) return sourceReplacementErrors[code]
     return code === 'cancelled' ? 'Source replacement cancelled. The previous source is still in use.'
@@ -185,6 +204,7 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
   return { id, title, ranges, scenes, captions: v.captions as boolean, caption_preset, video_speed: num(v.video_speed, 1, 2),
     status: status as CandidateEdit['status'], caption_edits, caption_suppression_ranges,
     caption_y: v.caption_y == null ? null : num(v.caption_y, .1, .9),
+    ...(v.title_card === undefined ? {} : { title_card: typeof v.title_card === 'boolean' ? v.title_card : fail() }),
     ...(v.dismissed_camera_markers === undefined ? {} : { dismissed_camera_markers: [...new Set(arr(v.dismissed_camera_markers, 5000).map((t) => num(t, 0, duration)))].sort((a, b) => a - b) }) }
 }
 function question(value: unknown): EditorQuestion {
@@ -224,7 +244,8 @@ export function parseEditorProject(value: unknown): EditorProject {
       camera_scan = { start_ms, end_ms, frames, markers }
     }
     const baked_hash = typeof c.baked_hash === 'string' && /^[a-f0-9]{64}$/.test(c.baked_hash) ? c.baked_hash : undefined
-    return { ...edit, ...(camera_scan ? { camera_scan } : {}), ...(baked_hash ? { baked_hash } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: clampText(c.reason, 4000), review,
+    const source_clip = Number.isSafeInteger(c.source_clip) && (c.source_clip as number) >= 0 && (c.source_clip as number) <= 999 ? c.source_clip as number : undefined
+    return { ...edit, ...(camera_scan ? { camera_scan } : {}), ...(baked_hash ? { baked_hash } : {}), ...(source_clip !== undefined ? { source_clip } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: clampText(c.reason, 4000), review,
       exports: arr(c.exports, 1000).map((n) => num(n, 0, 999)) }
   })
   if (!candidates.length) fail()
@@ -233,8 +254,8 @@ export function parseEditorProject(value: unknown): EditorProject {
     transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }
 export function candidateEdit(c: CandidateEdit): CandidateEdit {
-  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers } = c
-  return { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges, caption_y: c.caption_y ?? null, ...(dismissed_camera_markers ? { dismissed_camera_markers } : {}) }
+  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card } = c
+  return { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges, caption_y: c.caption_y ?? null, ...(dismissed_camera_markers ? { dismissed_camera_markers } : {}), ...(title_card !== undefined ? { title_card } : {}) }
 }
 export function renderEditKey(c: CandidateEdit): string {
   return JSON.stringify({ ...candidateEdit(c), status: undefined, dismissed_camera_markers: undefined })
@@ -337,4 +358,11 @@ export function stepFrame(frames: number[], time: number, direction: -1 | 1): nu
 export function cameraMarkers(c: EditorCandidate, threshold: number): CameraScan['markers'] {
   const dismissed = new Set(c.dismissed_camera_markers ?? [])
   return (c.camera_scan?.markers ?? []).filter((m) => m.score >= threshold && !dismissed.has(m.at_ms) && c.ranges.some(([a, b]) => m.at_ms > a && m.at_ms < b))
+}
+
+/** The candidate an "Edit clip" request opens: the clip's own editor candidate, else the one made from it. */
+export function candidateForClip(candidates: Pick<EditorCandidate, 'id' | 'source_clip' | 'exports'>[], clip: { clip_index: number; editor_candidate?: string | null }): string | null {
+  if (clip.editor_candidate && candidates.some((c) => c.id === clip.editor_candidate)) return clip.editor_candidate
+  return candidates.find((c) => c.source_clip === clip.clip_index)?.id
+    ?? candidates.find((c) => c.exports.includes(clip.clip_index))?.id ?? null
 }

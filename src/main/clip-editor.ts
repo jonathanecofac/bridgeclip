@@ -1,9 +1,11 @@
 import { execFile, spawn, type ChildProcess } from 'child_process'
-import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
+import { constants, closeSync, createWriteStream, existsSync, fstatSync, linkSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
+import { open, type FileHandle } from 'fs/promises'
+import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
-import { delimiter, dirname, join } from 'path'
+import { delimiter, dirname, isAbsolute, join, win32 } from 'path'
 import { createHash, randomUUID } from 'crypto'
-import { EDITOR_REVISION_CONFLICT, editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
+import { EDITOR_REVISION_CONFLICT, EDITOR_SOURCE_UNAVAILABLE, editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
@@ -11,7 +13,7 @@ import { getBridgeRunnerPath, getEnginePath, resolvePythonPath, runtimeEnvironme
 import { resolveBinary } from './tools'
 import { logger } from './logger'
 
-type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source'
+type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source' | 'create-project'
 interface EditorOperation { progress?: EditorSession['progress']; action: NonNullable<EditorSession['operation']>; child?: ChildProcess; cancelled?: boolean; abort?: AbortController; batch?: EditorBatch }
 const operations = new Map<string, EditorOperation>()
 export function editorBusy(path: string): boolean { return operations.has(realpathSync(path)) }
@@ -222,10 +224,10 @@ function runWorker(run: string, operation: EditorOperation, action: WorkerAction
       try {
         const value = JSON.parse(line)
         if (value?.type === 'progress') {
-          if (action === 'scan-cameras' && (value.phase === 'scan' || value.phase === 'preview') &&
+          if ((action === 'scan-cameras' || (action === 'create-project' && value.phase === 'preview')) && (value.phase === 'scan' || value.phase === 'preview') &&
               typeof value.percent === 'number' && Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) {
             const previous = operation.progress
-            if (!previous || (previous.phase === 'scan' && value.phase === 'preview') ||
+            if (!previous || (previous.phase !== 'preview' && value.phase === 'preview') ||
                 (previous.phase === value.phase && value.percent >= previous.percent)) {
               operation.progress = { phase: value.phase, percent: Math.floor(value.percent) }
             }
@@ -258,6 +260,14 @@ function runWorker(run: string, operation: EditorOperation, action: WorkerAction
     child.stdin.on('error', () => {})
     child.stdin.end(JSON.stringify(request))
   })
+}
+
+function workerSetup(settings: ReturnType<typeof loadSettings>): { env: Record<string, string | undefined>; python: string } {
+  const engine = getEnginePath()
+  const env: Record<string, string | undefined> = { ...runtimeEnvironment(), ...getSettingsForBridge({ ...settings, jevEnabled: 'on' }), PYTHONPATH: engine, PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
+  const ffmpeg = resolveBinary('ffmpeg')
+  if (ffmpeg !== 'ffmpeg') env.PATH = `${dirname(ffmpeg)}${delimiter}${env.PATH ?? ''}`
+  return { env, python: resolvePythonPath(engine, settings.pythonPath) }
 }
 
 const quote = (title: string): string => `“${title.length > 60 ? `${title.slice(0, 59)}…` : title}”`
@@ -303,12 +313,9 @@ async function executeEditor(path: unknown, revision: unknown, candidateId: unkn
     const candidates = action === 'replace-source' ? session.project.candidates.slice(0, 1) : action === 'export-all' ? session.project.candidates.filter((c) => c.status === 'ready') : session.project.candidates.filter((c) => c.id === candidateId)
     if (!candidates.length) throw new Error('Mark at least one clip ready before baking.')
     if (action === 'export-all') operation.batch = { completed: 0, total: candidates.length }
-    const settings = loadSettings(), engine = getEnginePath()
+    const settings = loadSettings()
     if (action === 'review' && !settings.openrouterApiKey) throw new Error('Add your OpenRouter key in Settings to run this review.')
-    const env: Record<string, string | undefined> = { ...runtimeEnvironment(), ...getSettingsForBridge({ ...settings, jevEnabled: 'on' }), PYTHONPATH: engine, PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
-    const ffmpeg = resolveBinary('ffmpeg')
-    if (ffmpeg !== 'ffmpeg') env.PATH = `${dirname(ffmpeg)}${delimiter}${env.PATH ?? ''}`
-    const python = resolvePythonPath(engine, settings.pythonPath), limitMs = workerLimitMs(session.project.duration_ms)
+    const { env, python } = workerSetup(settings), limitMs = workerLimitMs(session.project.duration_ms)
     for (const candidate of candidates) {
       if (operation.cancelled) break
       try {
@@ -358,4 +365,112 @@ export function editorCloseReady(saved: unknown): void {
   const resume = resumeAfterSave
   resumeAfterSave = null
   if (saved === true && resume) setImmediate(resume)
+}
+
+// ---------------------------------------------------------------------------
+// "Edit clip" on Automatic runs
+// ---------------------------------------------------------------------------
+
+const SOURCE_VIDEO = /\.(?:mp4|m4v|mkv|webm|avi|mov|flv)$/i
+/** The local video an Automatic run recorded, while it is still a regular file there. Web sources return null. */
+export function recordedSourcePath(url: string): string | null {
+  const path = url.replace(/^file:\/\//i, '')
+  if (!path || path !== path.trim() || path.includes('\0') || /^[a-z][a-z0-9+.-]*:\/\//i.test(path) || !isAbsolute(path) || !SOURCE_VIDEO.test(path)) return null
+  try { return lstatSync(path).isFile() ? path : null } catch { return null }
+}
+function missingSourceMessage(url: string): string {
+  if (/^https?:\/\//i.test(url)) return `${EDITOR_SOURCE_UNAVAILABLE} These clips came from a web video that BridgeClip did not keep. Choose the same video saved on this computer.`
+  const name = url ? win32.basename(url.replace(/^file:\/\//i, '')) : ''
+  return `${EDITOR_SOURCE_UNAVAILABLE}${name ? ` “${name.slice(0, 120)}” was moved, renamed or deleted.` : ''} Choose the video these clips came from.`
+}
+
+/**
+ * Bring the original video into the run without duplicating it when possible:
+ * a hard link on the same drive (instant, no extra space, survives the
+ * original being moved or deleted), otherwise a full copy of the opened file.
+ */
+async function linkOrCopy(media: { handle: FileHandle; size: number; canonical: string }, destination: string, operation: EditorOperation): Promise<'link' | 'copy'> {
+  const opened = await media.handle.stat()
+  try {
+    linkSync(media.canonical, destination)
+    const linked = statSync(destination)
+    if (linked.ino === opened.ino && linked.dev === opened.dev) { operation.progress = { phase: 'source', percent: 100 }; return 'link' }
+    unlinkSync(destination)
+  } catch { try { unlinkSync(destination) } catch { /* Nothing was linked. */ } }
+  operation.abort = new AbortController()
+  let copied = 0
+  const meter = new Transform({ transform(chunk: Buffer, _encoding, done) {
+    copied += chunk.length
+    operation.progress = { phase: 'source', percent: Math.min(99, Math.floor(100 * copied / Math.max(1, media.size))) }
+    done(null, chunk)
+  } })
+  await pipeline(media.handle.createReadStream({ autoClose: false, start: 0 }), meter, createWriteStream(destination, { flags: 'wx', mode: 0o600 }), { signal: operation.abort.signal })
+  operation.progress = { phase: 'source', percent: 100 }
+  return 'copy'
+}
+
+/**
+ * Make an Automatic run editable: every clip becomes an editor candidate that
+ * starts Baked (its existing file is the first export). `chosen` is a video
+ * the user picked with the file dialog when the recorded original is missing.
+ * Exports from the editor are new clips; the originals are never overwritten.
+ */
+export async function createEditorProject(path: unknown, chosen?: unknown): Promise<EditorSession> {
+  const run = runPath(path)
+  const settings = loadSettings()
+  const output = await getJobOutput(run, settings.outputDirectory)
+  if (!output) throw new Error('Could not read this run. Reopen it from the Library and try again.')
+  const projectFile = join(run, 'editor-project.json')
+  if (output.editor_project && existsSync(projectFile)) return openEditor(run)
+  if (operations.has(run) || operations.size >= 2) throw new Error('An editor operation is already running. Try again when it finishes.')
+  const operation: EditorOperation = { action: 'create-project', progress: { phase: 'source', percent: 0 } }
+  operations.set(run, operation)
+  const source = join(run, 'editor-source.mp4'), preview = join(run, 'editor-preview.mp4')
+  const clean = (): void => { for (const file of [source, preview, `${preview}.partial.mp4`]) { try { rmSync(file, { force: true }) } catch { /* Retried by the next attempt. */ } } }
+  let created = false
+  try {
+    if (!existsSync(projectFile)) {
+      clean()
+      let media: { handle: FileHandle; size: number; canonical: string }
+      if (chosen !== undefined && chosen !== null) {
+        assertAbsolutePath(chosen)
+        media = await openAuthorizedMedia(chosen, settings.outputDirectory)
+      } else {
+        const recorded = recordedSourcePath(output.source_video_url)
+        if (!recorded) throw new Error(missingSourceMessage(output.source_video_url))
+        const handle = await open(recorded, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+        try {
+          const stat = await handle.stat()
+          if (!stat.isFile()) throw new Error(missingSourceMessage(output.source_video_url))
+          media = { handle, size: stat.size, canonical: realpathSync(recorded) }
+        } catch (error) { await handle.close(); throw error }
+      }
+      try {
+        const mode = await linkOrCopy(media, source, operation)
+        logger.info('editor.create.source', { mode, bytes: media.size })
+      } finally { await media.handle.close() }
+    }
+    if (operation.cancelled) throw new Error(editorFailureMessage('create-project', 'cancelled'))
+    operation.progress = { phase: 'preview', percent: 0 }
+    const { env, python } = workerSetup(settings)
+    const durationMs = Math.max(1000, output.source_video_duration_seconds * 1000)
+    await runWorker(run, operation, 'create-project', env, python, workerLimitMs(durationMs),
+      { run, library: realpathSync(settings.outputDirectory), action: 'create-project', revision: 0 })
+    created = true
+  } catch (error) {
+    if (operation.cancelled && !(error instanceof Error && error.message.startsWith(EDITOR_SOURCE_UNAVAILABLE))) throw new Error(editorFailureMessage('create-project', 'cancelled'))
+    throw error
+  } finally {
+    if (!created && !existsSync(projectFile)) clean()
+    operation.child = undefined
+    operations.delete(run)
+  }
+  logger.info('editor.create.done')
+  return openEditor(run)
+}
+
+/** The running operation without reading the project: polled while "Edit clip" prepares a run. */
+export function readEditorOperation(path: unknown): { operation: EditorOperation['action'] | null; progress?: EditorSession['progress'] } {
+  const operation = operations.get(runPath(path))
+  return { operation: operation?.action ?? null, ...(operation?.progress ? { progress: { ...operation.progress } } : {}) }
 }

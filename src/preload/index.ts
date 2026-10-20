@@ -128,6 +128,10 @@ export interface BridgeClipAPI {
     /** Main asks the open editor to save before a close or quit continues. */
     onSaveBeforeClose: (callback: () => void) => () => void
     closeReady: (saved: boolean) => Promise<void>
+    /** Make an Automatic run editable ("Edit clip"). `source` is a video chosen with dialog.selectVideo when the original is missing. */
+    create: (path: string, source?: string | null) => Promise<EditorSession>
+    /** The running editor operation for a run, readable before it has a project. */
+    operation: (path: string) => Promise<{ operation: EditorSession['operation']; progress?: EditorSession['progress'] }>
   }
   edits: { inspect: (outputDir: string) => Promise<EditAudit> }
   models: { list: (refresh?: boolean) => Promise<OpenRouterCatalog> }
@@ -314,7 +318,9 @@ const api: BridgeClipAPI = {
     progress: (path) => ipcRenderer.invoke('editor:progress', path),
     freeMedia: (path, revision) => ipcRenderer.invoke('editor:freeMedia', path, revision),
     onSaveBeforeClose: (callback) => subscribe<void>('editor:saveBeforeClose', () => callback()),
-    closeReady: (saved) => ipcRenderer.invoke('editor:closeReady', saved)
+    closeReady: (saved) => ipcRenderer.invoke('editor:closeReady', saved),
+    create: (path, source) => ipcRenderer.invoke('editor:create', path, source ?? null),
+    operation: (path) => ipcRenderer.invoke('editor:operation', path)
   },
   edits: { inspect: (outputDir) => ipcRenderer.invoke('edits:inspect', outputDir) },
   models: { list: (refresh = false) => ipcRenderer.invoke('models:list', refresh) },
