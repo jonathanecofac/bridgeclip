@@ -2,18 +2,18 @@
   "name": "bridgeclip",
   "private": true,
   "productName": "BridgeClip",
-  "version": "0.1.19",
+  "version": "0.2.0",
   "description": "BridgeClip: open-source AI video clipping by BridgeMind. Turn long videos into captioned short-form clips, locally, with your own API keys.",
   "main": "./out/main/index.js",
   "author": "BridgeMind",
   "license": "MIT",
-  "homepage": "https://github.com/bridge-mind/bridgeclip",
+  "homepage": "https://github.com/jonathanecofac/bridgeclip",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bridge-mind/bridgeclip.git"
+    "url": "https://github.com/jonathanecofac/bridgeclip.git"
   },
   "bugs": {
-    "url": "https://github.com/bridge-mind/bridgeclip/issues"
+    "url": "https://github.com/jonathanecofac/bridgeclip/issues"
   },
   "scripts": {
     "dev": "install-electron && electron-vite dev",

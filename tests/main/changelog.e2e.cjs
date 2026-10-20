@@ -40,7 +40,7 @@ test('Settings → About and Help → Changelog show the bundled changelog', { t
   await dialog.getByRole('button', { name: 'All releases on GitHub' }).click()
   const opened = () => app.evaluate(() => globalThis.changelogTest.opened)
   for (let i = 0; i < 40 && (await opened()).length === 0; i++) await page.waitForTimeout(50)
-  assert.deepEqual(await opened(), ['https://github.com/bridge-mind/bridgeclip/releases'])
+  assert.deepEqual(await opened(), ['https://github.com/jonathanecofac/bridgeclip/releases'])
 
   await page.keyboard.press('Escape')
   await dialog.waitFor({ state: 'detached' })

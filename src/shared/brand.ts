@@ -3,7 +3,10 @@
 export const APP_NAME = 'BridgeClip'
 export const APP_TAGLINE = 'Open-source AI video clipping'
 
-export const REPO_URL = 'https://github.com/bridge-mind/bridgeclip'
+/** This fork's repository: Help links, release notes and updates. */
+export const REPO_URL = 'https://github.com/jonathanecofac/bridgeclip'
+/** BridgeMind's original BridgeClip, which this fork follows. */
+export const UPSTREAM_REPO_URL = 'https://github.com/bridge-mind/bridgeclip'
 export const ISSUES_URL = `${REPO_URL}/issues`
 export const RELEASES_URL = `${REPO_URL}/releases`
 export const LICENSE_NAME = 'MIT'

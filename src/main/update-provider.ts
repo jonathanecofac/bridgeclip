@@ -3,7 +3,9 @@ import { GitHubProvider } from 'electron-updater/out/providers/GitHubProvider'
 import { parseUpdateInfo, type ProviderRuntimeOptions } from 'electron-updater/out/providers/Provider'
 
 /** Where releases are published (electron-builder.yml `publish`). */
-export const UPDATE_REPOSITORY = { owner: 'bridge-mind', repo: 'bridgeclip' } as const
+// This fork updates only from its own releases, never from BridgeMind's, so
+// an official release cannot replace features added here.
+export const UPDATE_REPOSITORY = { owner: 'jonathanecofac', repo: 'bridgeclip' } as const
 
 /** How many recent releases to look through for one that ships this platform. */
 const RELEASE_SCAN_LIMIT = 30

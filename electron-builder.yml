@@ -90,7 +90,10 @@ dmg:
       path: /Applications
 
 win:
-  verifyUpdateCodeSignature: true
+  # This fork's installers are not code-signed, so a publisher check would
+  # reject every update. Updates are still verified against the SHA-512 in
+  # latest.yml, downloaded over HTTPS from this repository's releases.
+  verifyUpdateCodeSignature: false
   signtoolOptions:
     publisherName: BRIDGEMIND LLC
   target:
@@ -137,5 +140,5 @@ deb:
 # latest-mac.yml / latest.yml / latest-linux.yml from the published release.
 publish:
   provider: github
-  owner: bridge-mind
+  owner: jonathanecofac
   repo: bridgeclip

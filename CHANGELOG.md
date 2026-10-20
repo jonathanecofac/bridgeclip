@@ -1,12 +1,17 @@
 # Changelog
 
-What's new in each version of BridgeClip, newest first. You can also read this in the app under **Settings → About → Changelog** or **Help → Changelog**. Downloads for every version are on [GitHub Releases](https://github.com/bridge-mind/bridgeclip/releases).
+What's new in each version of BridgeClip, newest first. You can also read this in the app under **Settings → About → Changelog** or **Help → Changelog**. This is Jonathan's fork of BridgeMind's BridgeClip: versions from 0.2.0 are on [this fork's releases](https://github.com/jonathanecofac/bridgeclip/releases); earlier ones are on [BridgeMind's](https://github.com/bridge-mind/bridgeclip/releases).
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Maintainers: see [Changelog](CONTRIBUTING.md#changelog) in the contributing guide before editing.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
 ### Added
+
+- **Edit clip** on every clip in the Library opens the editor on that clip. Automatic runs become editable once: BridgeClip brings back the original video (linked, not copied, on the same drive), keeps each clip's cut, framing, captions and title card, and asks you to locate the video if it moved. **Export clip** renders your edit as a new clip marked **Edited**; the original clip is never overwritten.
+- **Title card** switch per clip in the editor's Captions tab.
 
 - **What to clip** in Create → Clips: describe the moments you want, such as "every time they talk about pricing". Leave it blank to get the strongest moments as before.
 - **Show title at the top** in Create → Captions turns off the title card on Automatic clips.
@@ -26,6 +31,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ### Changed
 
+- Updates come from this fork's releases only, so an official BridgeClip release can no longer replace features added here. Your settings, keys and Library are unchanged.
 - Smart framing ignores weak background faces, stays on a speaker who briefly looks away, follows talking heads inside 4:3 video, and analyzes footage faster.
 - Screen + webcam clips fill the top panel again.
 - Editor previews use much less disk space, and downloaded sources are moved into the project instead of copied.
@@ -108,7 +114,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/bridge-mind/bridgeclip/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.2.0
 [0.1.19]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.19
 [0.1.18]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.18
 [0.1.17]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.17

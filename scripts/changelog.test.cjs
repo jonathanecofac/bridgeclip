@@ -50,7 +50,7 @@ test('CHANGELOG.md groups changes under Keep a Changelog types and links every v
     }
     assert.equal(new Set(release.sections.map((section) => section.heading)).size, release.sections.length, `${release.version} repeats a change type`)
     const escaped = release.version.replace(/\./g, '\\.')
-    assert.match(markdown, new RegExp(`^\\[${escaped}\\]: https://github\\.com/bridge-mind/bridgeclip/\\S+$`, 'm'), `Add a link definition for [${release.version}] at the end of CHANGELOG.md`)
+    assert.match(markdown, new RegExp(`^\\[${escaped}\\]: https://github\\.com/(?:jonathanecofac|bridge-mind)/bridgeclip/\\S+$`, 'm'), `Add a link definition for [${release.version}] at the end of CHANGELOG.md`)
   }
 })
 
