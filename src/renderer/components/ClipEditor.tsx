@@ -13,6 +13,9 @@ import { ActionMenu } from './ui/ActionMenu'
 import { Button } from './ui/Button'
 import { ConfirmDialog } from './ui/ConfirmDialog'
 import { CaptionStylePanel } from './CaptionStylePanel'
+import { TextOverlayPanel } from './TextOverlayPanel'
+import { TextOverlayPreview } from './TextOverlayPreview'
+import type { TextOverlay } from '../../shared/text-overlays'
 import { captionLines, type CaptionLine } from '../lib/caption-words'
 import { EditorCaptionPreview } from './EditorCaptionPreview'
 import { captionAnchor } from '../lib/caption-preview'
@@ -65,7 +68,8 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
   const closeReplacement = useCallback(() => setReplacement(null), [])
   const [selected, setSelected] = useState(0)
   // From a clip's "Edit clip", start on captions and title; Jev review needs an OpenRouter key.
-  const [tab, setTab] = useState<'review' | 'framing' | 'captions' | 'transcript'>(initialCandidateId ? 'captions' : 'review')
+  const [tab, setTab] = useState<'review' | 'framing' | 'captions' | 'text' | 'transcript'>(initialCandidateId ? 'captions' : 'review')
+  const [selectedOverlay, setSelectedOverlay] = useState<number | null>(null)
   const [time, setTime] = useState(0)
   const timeRef = useRef(time); timeRef.current = time
   const [playing, setPlaying] = useState(false)
@@ -277,7 +281,7 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
     }
   })
   useEffect(() => {
-    if (candidate && video.current) { video.current.pause(); seek(candidate.ranges[0][0]); setPanel(0); setEditingCaption(null); setSelectedCamera(null); setTimelineZoom((zoom) => zoom === 'source' ? 'source' : 'clip') }
+    if (candidate && video.current) { video.current.pause(); seek(candidate.ranges[0][0]); setPanel(0); setEditingCaption(null); setSelectedCamera(null); setSelectedOverlay(null); setTimelineZoom((zoom) => zoom === 'source' ? 'source' : 'clip') }
   // Only candidate selection resets the playhead, never an edit.
   }, [selected, session?.previewPath])
   useEffect(() => { if (video.current && candidate) video.current.playbackRate = candidate.video_speed * reviewSpeed }, [candidate?.video_speed, reviewSpeed])
@@ -484,6 +488,29 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
     const item = { start_ms, end_ms: Math.min(project.duration_ms, start_ms + 1500), text: 'New caption' }
     setInserts([...inserts, item]); setTab('transcript'); setEditingCaption(null); setEditingInsert(item.start_ms)
   }
+  const overlays = candidate.text_overlays ?? []
+  const setOverlays = (text_overlays: TextOverlay[], remember = true): void => change({ text_overlays }, remember)
+  /** Drag a text overlay block on the timeline: it keeps its length and moves in source time. */
+  const startOverlayDrag = (e: React.PointerEvent<HTMLButtonElement>, index: number): void => {
+    if (editingDisabled || e.button !== 0) return
+    e.preventDefault(); e.stopPropagation(); video.current?.pause()
+    const target = e.currentTarget, bounds = target.parentElement!.getBoundingClientRect(), x = e.clientX, original = overlays[index]
+    let moved = false
+    dragging.current = true; target.setPointerCapture(e.pointerId); setDragWindow([viewStart, viewEnd]); setSelectedOverlay(index)
+    const move = (event: PointerEvent): void => {
+      if (!moved && Math.abs(event.clientX - x) < 3) return
+      const length = original.end_ms - original.start_ms
+      const start = Math.max(0, Math.min(project.duration_ms - length, Math.round(original.start_ms + (event.clientX - x) / bounds.width * (viewEnd - viewStart))))
+      setOverlays(overlays.map((o, i) => i === index ? { ...o, start_ms: start, end_ms: start + length } : o), !moved)
+      moved = true
+    }
+    const done = (): void => {
+      target.removeEventListener('pointermove', move); target.removeEventListener('lostpointercapture', done)
+      dragging.current = false; setDragWindow(null)
+      if (!moved) { seek(original.start_ms); setTab('text') }
+    }
+    target.addEventListener('pointermove', move); target.addEventListener('lostpointercapture', done)
+  }
   /** Drag a caption block on the timeline: the line keeps its length and moves in source time. */
   const startCaptionDrag = (e: React.PointerEvent<HTMLButtonElement>, line: CaptionLine): void => {
     if (editingDisabled || e.button !== 0) return
@@ -685,6 +712,10 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
             {showSubtitlePreview && !exactFrame && <EditorCaptionPreview canvas={canvas} project={project} candidate={candidate} time={time} disabled={editingDisabled}
               guide={tab === 'transcript' || tab === 'captions'} onMove={moveCaption} onMoveX={(x, remember) => { video.current?.pause(); change({ caption_style: minimalOverrides(candidate.caption_preset, { ...effectiveCaptionStyle(candidate.caption_preset, candidate.caption_style), x }) }, remember) }}
               onDrag={active => { dragging.current = active; if (active) video.current?.pause() }} />}
+            {!exactFrame && <TextOverlayPreview canvas={canvas} landscape={project.aspect_ratio === '16:9'} overlays={overlays} time={time}
+              selected={tab === 'text' ? selectedOverlay : null} disabled={editingDisabled} onSelect={(i) => { setSelectedOverlay(i); setTab('text') }}
+              onMove={(i, x, y, remember) => { video.current?.pause(); setOverlays(overlays.map((o, j) => j === i ? { ...o, x, y } : o), remember) }}
+              onDrag={(active) => { dragging.current = active; if (active) video.current?.pause() }} />}
             {exactFrame && <div className="editor-exact-preview"><img src={localFileUrl(exactFrame.path)} alt={`Exported frame at ${clock(exactFrame.time)}`} />
               <p>Exact export frame at {clock(exactFrame.time)}<Button size="sm" variant="ghost" onClick={() => setExactFrame(null)}>Close</Button></p></div>}
           </div>
@@ -735,6 +766,12 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
               style={{ left: `${(Math.max(a, viewStart) - viewStart) / (viewEnd - viewStart) * 100}%`, width: `${(Math.min(b, viewEnd) - Math.max(a, viewStart)) / (viewEnd - viewStart) * 100}%` }}
               onClick={() => { seek(a); setTab('captions') }} />)}
           </div>}
+          {overlays.length > 0 && <div className={cn('editor-overlay-blocks', editingDisabled && 'opacity-60')} aria-label="Text track">
+            {overlays.map((o, i) => o.end_ms > viewStart && o.start_ms < viewEnd && <button key={i} className={cn('editor-overlay-block', tab === 'text' && selectedOverlay === i && 'selected')}
+              style={{ left: `${(Math.max(o.start_ms, viewStart) - viewStart) / (viewEnd - viewStart) * 100}%`, width: `${(Math.min(o.end_ms, viewEnd) - Math.max(o.start_ms, viewStart)) / (viewEnd - viewStart) * 100}%` }}
+              title={`${o.text} · ${clock(o.start_ms)} – ${clock(o.end_ms)} · Drag to move, click to edit`} aria-label={`Text ${clock(o.start_ms)}: ${o.text}`}
+              disabled={editingDisabled} onPointerDown={(e) => startOverlayDrag(e, i)}>{o.text.split('\n')[0]}</button>)}
+          </div>}
           {candidate.captions && <div className={cn('editor-caption-blocks', editingDisabled && 'opacity-60')} aria-label="Caption track">
             {captionLines(project, candidate).filter((line) => line.end > viewStart && line.start < viewEnd).slice(0, 400).map((line) => {
               const left = (Math.max(line.start, viewStart) - viewStart) / (viewEnd - viewStart), width = (Math.min(line.end, viewEnd) - Math.max(line.start, viewStart)) / (viewEnd - viewStart)
@@ -758,7 +795,7 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
           </div>
         </div>
       </div>
-      <aside className="editor-inspector"><div className="editor-tabs">{(['review', 'framing', 'captions', 'transcript'] as const).map((t) => <button key={t} aria-pressed={tab === t} onClick={() => setTab(t)} className={cn(tab === t && 'selected')}>{t === 'review' ? 'Jev' : t[0].toUpperCase() + t.slice(1)}</button>)}</div>
+      <aside className="editor-inspector"><div className="editor-tabs">{(['review', 'framing', 'captions', 'text', 'transcript'] as const).map((t) => <button key={t} aria-pressed={tab === t} onClick={() => setTab(t)} className={cn(tab === t && 'selected')}>{t === 'review' ? 'Jev' : t[0].toUpperCase() + t.slice(1)}</button>)}</div>
         <div ref={transcriptPanel} className="editor-inspector-body"><label className="editor-label" htmlFor="editor-title">Title</label><textarea id="editor-title" value={candidate.title} maxLength={200} disabled={editingDisabled} rows={2} onChange={(e) => { if (e.target.value.trim()) change({ title: e.target.value }) }} />
           {tab === 'review' && <div className="space-y-3 mt-4"><div className="flex items-center justify-between"><span className={cn('text-xs', current ? candidate.review?.decision === 'passes' ? 'text-success' : 'text-warning' : 'text-ink-muted')}>{!current ? 'Review out of date' : candidate.review?.decision === 'passes' ? 'Checks passed' : 'Consider before baking'}</span><Button size="sm" disabled={editingDisabled} onClick={() => { void run('review') }}>Review again</Button></div><p className="text-2xs text-ink-subtle">{current ? 'Review the questions, then adjust the cut and framing. You decide when the clip is ready.' : 'These results describe an earlier edit. Run Jev again to check your changes.'}</p>{candidate.review?.questions.map((q) => <Question key={q.id} q={q} />)}{!candidate.review && <p>No review is available yet. Run Jev to evaluate this candidate.</p>}{candidate.review?.cuts.map((cut, i) => <div key={i}><p className="editor-label">Removed {clock(cut.interval[0])} – {clock(cut.interval[1])}</p>{cut.questions.map((q) => <Question key={q.id} q={q} />)}</div>)}</div>}
           {tab === 'framing' && <fieldset disabled={editingDisabled} className="space-y-4 mt-4"><div className="editor-layouts">{(['fill', 'split', 'fit'] as const).map((l) => <button key={l} className={cn(currentScene.layout === l && 'selected')} onClick={() => setLayout(l)}>{l === 'fill' ? 'Full frame' : l === 'split' ? 'Split' : 'Fit'}</button>)}</div>{currentScene.layout === 'split' && <div className="flex gap-2">{['Top', 'Bottom'].map((name, i) => <Button key={i} size="sm" variant={panel === i ? 'primary' : 'secondary'} onClick={() => setPanel(i)}>{name}</Button>)}</div>}{currentScene.layout !== 'fit' && <><label className="editor-label">Zoom<input aria-label="Crop zoom" type="range" min={1} max={4} step={.02} value={Math.min(4, defaultCrop(project.width, project.height, aspect * currentScene.crops.length)[2] / crop[2])} onChange={(e) => cropChange(defaultCrop(project.width, project.height, aspect * currentScene.crops.length, crop[0] + crop[2] / 2, crop[1] + crop[3] / 2, Number(e.target.value)))} /></label>{([0, 1] as const).map((axis) => <label key={axis} className="editor-label">{axis === 0 ? 'Horizontal' : 'Vertical'}<input type="range" aria-label={axis === 0 ? 'Horizontal crop position' : 'Vertical crop position'} min={0} max={Math.max(0, 1 - crop[axis + 2])} step={.001} value={crop[axis]} onChange={(e) => { const c = [...crop] as Crop; c[axis] = Number(e.target.value); cropChange(c) }} /></label>)}</>}{sceneIndex > 0 && <div className="editor-motion"><label className="flex items-center justify-between gap-2 text-xs"><span>Smooth movement</span><input type="checkbox" aria-label="Smooth movement" checked={!!currentScene.transition_ms} disabled={!canAnimate || editingDisabled} onChange={(e) => sceneChange({ transition_ms: e.target.checked ? 600 : undefined })} /></label>{canAnimate && currentScene.transition_ms ? <label className="editor-label mt-3">Duration <span className="float-right">{(currentScene.transition_ms / 1000).toFixed(1)}s</span><input aria-label="Movement duration" type="range" min={100} max={5000} step={100} value={currentScene.transition_ms} onChange={(e) => sceneChange({ transition_ms: Number(e.target.value) })} /></label> : !canAnimate ? <p className="text-2xs text-ink-subtle mt-2">Use the same layout as the previous section to animate its crops.</p> : null}{!!currentScene.transition_ms && <Button size="sm" variant="ghost" onClick={() => { seek(Math.max(start, currentScene.at_ms)); void video.current?.play() }}>Preview movement</Button>}</div>}<div className="space-y-2 border-t border-white/10 pt-3"><div className="editor-layout-time">
@@ -769,6 +806,10 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
           </div><Button size="sm" icon={<Scissors size={13} />} disabled={candidate.scenes.length >= 60 || time <= start || time >= end || candidate.scenes.some((s) => Math.abs(s.at_ms - time) < .01)} onClick={() => newLayout()}>New layout here</Button>{sceneIndex > 0 && <Button size="sm" variant="ghost" onClick={() => change({ scenes: candidate.scenes.filter((_, i) => i !== sceneIndex) })}>Remove layout change</Button>}<Button size="sm" variant="ghost" onClick={() => change({ scenes: [{ ...currentScene, at_ms: 0 }] })}>Use layout for whole clip</Button></div></fieldset>}
           {tab === 'captions' && <fieldset disabled={editingDisabled} className="space-y-4 mt-4"><div className="flex items-center justify-between text-xs"><span>Burn in captions</span><Switch label="Burn in captions" checked={candidate.captions} onChange={(captions) => change({ captions })} /></div><div className="flex items-center justify-between text-xs"><span title="Draws the clip title as a card at the top of the video, like Automatic clips.">Title card</span><Switch label="Title card" checked={candidate.title_card === true} onChange={(title_card) => change({ title_card })} /></div><p className="text-2xs text-ink-subtle">Captions follow your final cuts. Fix words and timing in Transcript; use Exact preview to see the exported frame.</p><CaptionSuppression key={candidate.id} ranges={suppressedCaptions} cuts={candidate.ranges} time={time} duration={project.duration_ms} disabled={editingDisabled || !candidate.captions} onChange={(caption_suppression_ranges) => { video.current?.pause(); change({ caption_suppression_ranges }) }} seek={seek} />{candidate.captions && <CaptionStylePanel preset={candidate.caption_preset} overrides={candidate.caption_style} captionY={candidate.caption_y ?? null}
             onChange={(patch, remember) => change(patch, remember)} onCaptionY={(y, remember) => { if (y === null) change({ caption_y: null }); else moveCaption(y, remember) }} />}<label className="editor-label">Export speed<select value={candidate.video_speed} onChange={(e) => change({ video_speed: Number(e.target.value) })}>{[1, 1.1, 1.25, 1.5, 1.75, 2].map((n) => <option key={n} value={n}>{n}×</option>)}</select></label></fieldset>}
+          {tab === 'text' && <TextOverlayPanel overlays={overlays} selected={selectedOverlay !== null && selectedOverlay < overlays.length ? selectedOverlay : null} time={time}
+            clipStart={start} duration={project.duration_ms} title={candidate.title} disabled={editingDisabled} onSelect={setSelectedOverlay} seek={seek}
+            onChange={(next, remember) => { video.current?.pause(); setOverlays(next, remember) }}
+            timeInput={(label, value, onChange) => <TimeInput label={label} value={value} disabled={editingDisabled} onChange={onChange} />} />}
           {tab === 'transcript' && <section className="editor-subtitle-controls" aria-label="Subtitle placement">
             <div className="flex items-center justify-between gap-2 text-xs"><span>Subtitle placement guide</span><Switch label="Show subtitle guide" checked={showSubtitlePreview} onChange={setShowSubtitlePreview} /></div>
             {!candidate.captions ? <p className="text-2xs text-ink-muted">Subtitles are off for this clip. <button className="underline" disabled={editingDisabled} onClick={() => change({ captions: true })}>Enable subtitles</button></p>

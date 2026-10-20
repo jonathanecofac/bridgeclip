@@ -102,6 +102,8 @@ class RenderRequest:
     caption_suppression_ranges_ms: list[tuple[int, int]] = field(default_factory=list)
     # Explicit editor placement overrides automatic per-layout caption anchors.
     caption_y: Optional[float] = None
+    # Editor text overlays and hooks (text_overlays.validate_text_overlays), in source time.
+    text_overlays: list[dict] = field(default_factory=list)
 
     title_text: Optional[str] = None
     # Off keeps title_text for editorial review but draws no title card.
@@ -560,7 +562,16 @@ class RenderingService:
         caption_path = await self._generate_captions(
             request, target_width, target_height, window_start_ms, time_map, out_plan, is_landscape, plan,
         )
-        graph += self._caption_graph(caption_path, request.caption_suppression_ranges_ms, window_start_ms, time_map)
+        text_path = None
+        if request.text_overlays:
+            from clip_engine.services.text_overlays import write_text_overlays
+            text_path = write_text_overlays(request.text_overlays, window_start_ms, time_map, target_width, target_height,
+                os.path.join(os.path.dirname(request.output_path), f"text-{request.start_time_ms}-{request.end_time_ms}.ass"))
+        graph += self._caption_graph(caption_path, request.caption_suppression_ranges_ms, window_start_ms, time_map,
+                                     output="captions_drawn" if text_path else "captioned")
+        if text_path:
+            # After captions, so caption-free sections never hide text overlays.
+            graph += f";[captions_drawn]{self._caption_filter(text_path)}[captioned]"
         overlays = self._overlays(request, out_plan, target_width, target_height, is_landscape)
         # Burn captions and animate framing/overlays on the edited source clock,
         # then speed up the entire composited picture to match the tempo audio.
@@ -697,7 +708,7 @@ class RenderingService:
 
     def _caption_graph(
         self, caption_path: Optional[str], suppressed: list[tuple[int, int]],
-        window_start_ms: int, time_map: TimeMap,
+        window_start_ms: int, time_map: TimeMap, output: str = "captioned",
     ) -> str:
         """Cover our captions with the clean frame during source-time exclusions.
 
@@ -716,7 +727,7 @@ class RenderingService:
                         intervals.append((a, b))
         caption_filter = self._caption_filter(caption_path)
         if not intervals:
-            return f";[base]{caption_filter}[captioned]"
+            return f";[base]{caption_filter}[{output}]"
         # FFmpeg's expression parser rejects long addition chains (100 terms
         # on supported builds). Bound each enable expression independently while
         # drawing ASS once, so animation and linger keep their original clock.
@@ -726,8 +737,8 @@ class RenderingService:
                  f";[caption_input]{caption_filter}[caption_drawn_0]")
         for i, group in enumerate(groups):
             enabled = '+'.join(f'gte(t,{a / 1000:.3f})*lt(t,{b / 1000:.3f})' for a, b in group)
-            output = 'captioned' if i == len(groups) - 1 else f'caption_drawn_{i + 1}'
-            graph += f";[caption_drawn_{i}][caption_clean_{i}]overlay=enable='{enabled}':format=auto[{output}]"
+            label = output if i == len(groups) - 1 else f'caption_drawn_{i + 1}'
+            graph += f";[caption_drawn_{i}][caption_clean_{i}]overlay=enable='{enabled}':format=auto[{label}]"
         return graph
 
     def _caption_filter(self, caption_path: Optional[str]) -> str:

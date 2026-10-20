@@ -1,4 +1,5 @@
 import { parseCaptionStyle, type CaptionStyleOverrides } from './caption-style'
+import { parseTextOverlays, type TextOverlay } from './text-overlays'
 
 /** Persisted source-time edits. Media paths and review results are main-process owned. */
 export type Crop = [number, number, number, number]
@@ -39,6 +40,8 @@ export interface CandidateEdit {
   caption_style?: CaptionStyleOverrides
   /** Captions added by hand, in source time. */
   caption_inserts?: CaptionInsert[]
+  /** Text overlays and hooks, in source time. */
+  text_overlays?: TextOverlay[]
 }
 export interface CaptionEdit { segment: number; text: string; start_ms?: number; end_ms?: number }
 export interface CaptionInsert { start_ms: number; end_ms: number; text: string }
@@ -223,6 +226,8 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
     if (!text.trim() || control(text) || end_ms - start_ms < 100) fail()
     return { start_ms, end_ms, text }
   }).sort((a, b) => a.start_ms - b.start_ms)
+  let text_overlays: TextOverlay[] | undefined
+  if (v.text_overlays !== undefined) { try { text_overlays = parseTextOverlays(v.text_overlays, duration) } catch { fail() } }
   let caption_style: CaptionStyleOverrides | undefined
   if (v.caption_style !== undefined) { try { caption_style = parseCaptionStyle(v.caption_style) } catch { fail() } }
   const caption_suppression_ranges = arr(v.caption_suppression_ranges === undefined ? [] : v.caption_suppression_ranges, 200).map((r) => {
@@ -235,6 +240,7 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
     caption_y: v.caption_y == null ? null : num(v.caption_y, .1, .9),
     ...(v.title_card === undefined ? {} : { title_card: typeof v.title_card === 'boolean' ? v.title_card : fail() }),
     ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}),
+    ...(text_overlays?.length ? { text_overlays } : {}),
     ...(v.dismissed_camera_markers === undefined ? {} : { dismissed_camera_markers: [...new Set(arr(v.dismissed_camera_markers, 5000).map((t) => num(t, 0, duration)))].sort((a, b) => a - b) }) }
 }
 function question(value: unknown): EditorQuestion {
@@ -291,9 +297,10 @@ export function parseEditorProject(value: unknown): EditorProject {
     transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }
 export function candidateEdit(c: CandidateEdit): CandidateEdit {
-  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card, caption_style, caption_inserts } = c
+  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card, caption_style, caption_inserts, text_overlays } = c
   return { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges, caption_y: c.caption_y ?? null, ...(dismissed_camera_markers ? { dismissed_camera_markers } : {}), ...(title_card !== undefined ? { title_card } : {}),
-    ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}) }
+    ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}),
+    ...(text_overlays?.length ? { text_overlays } : {}) }
 }
 export function renderEditKey(c: CandidateEdit): string {
   return JSON.stringify({ ...candidateEdit(c), status: undefined, dismissed_camera_markers: undefined })

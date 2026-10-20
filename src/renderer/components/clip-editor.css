@@ -183,3 +183,11 @@
 .editor-exact-preview img { max-width:100%; max-height:calc(100% - 64px); object-fit:contain; }
 .editor-exact-preview p { margin-top:6px; font-size:10px; color:rgb(var(--ink-muted)); display:flex; align-items:center; gap:8px; }
 .editor-title-card { position:absolute; left:50%; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; line-height:1.35; white-space:nowrap; font-family:"Montserrat", sans-serif; font-weight:900; color:#000; background:rgb(255 255 255 / .95); pointer-events:none; }
+.editor-text-overlay { position:absolute; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; line-height:1.2; white-space:pre; pointer-events:auto; cursor:move; touch-action:none; border:1px dashed transparent; }
+.editor-text-overlay:hover, .editor-text-overlay.selected, .editor-text-overlay:focus-visible { border-color:rgb(var(--accent)); }
+.editor-text-overlay:disabled { cursor:default; }
+.editor-overlay-row { display:flex; justify-content:space-between; gap:8px; padding:8px 10px; font-size:12px; text-align:left; border:1px solid #ffffff12; border-radius:6px; }
+.editor-overlay-row.selected { background:rgb(var(--accent) / .1); border-color:rgb(var(--accent) / .45); }
+.editor-overlay-blocks { position:relative; height:18px; margin-top:5px; border-radius:3px; background:#ffffff06; }
+.editor-overlay-block { position:absolute; top:1px; bottom:1px; min-width:3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding:0 4px; font-size:9px; line-height:16px; text-align:left; border-radius:3px; color:#1a1230; background:#c3a2facc; cursor:grab; touch-action:none; }
+.editor-overlay-block.selected { outline:2px solid white; }

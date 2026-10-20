@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 - **Edit caption timing**: change a line's start and end, drag captions on the new caption track, delete a line, or **Add** your own captions.
 - **Exact preview** renders the frame at the playhead with the export engine, so captions, fonts, title card and framing look exactly as in the exported MP4.
 - The output preview shows the real captions at the playhead in the clip's style, plus the title card; drag the captions to place them.
+- **Text overlays and hooks** in the editor's new Text tab: add a text or a bold hook for the first seconds, set its timing, font, size, colors, outline, background and pop or fade animation, and drag it on the preview. Texts stay visible in caption-free sections and follow your cuts.
 
 ## [0.2.0] - 2026-10-20
 

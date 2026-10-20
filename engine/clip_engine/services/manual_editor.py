@@ -605,6 +605,8 @@ def validate_candidate(c, duration, transcript_count=100000):
             raise ValueError('Invalid added caption')
     from clip_engine.config import validate_caption_overrides
     validate_caption_overrides(c.get('caption_style'))
+    from clip_engine.services.text_overlays import validate_text_overlays
+    validate_text_overlays(c.get('text_overlays'), duration)
 
 
 def _spread(tokens, start, end):
@@ -796,6 +798,11 @@ async def run_editor(config, progress=None):
     atomic_json(run / 'editor-project.json', project)
 
 
+def text_overlays_for(c, project):
+    from clip_engine.services.text_overlays import validate_text_overlays
+    return validate_text_overlays(c.get('text_overlays'), project['duration_ms'])
+
+
 async def export_clip(run, project, c, output, source, transcript):
     """Render one ready candidate and append it to the library's job output."""
     from clip_engine.config import caption_style_for
@@ -821,7 +828,7 @@ async def export_clip(run, project, c, output, source, transcript):
             transcript_segments=render_transcript, include_captions=c['captions'], caption_style=caption_style_for(c['caption_preset'], c.get('caption_style')),
             title_text=c['title'], include_title=c.get('title_card') is True,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
-            caption_y=c.get('caption_y'),
+            caption_y=c.get('caption_y'), text_overlays=text_overlays_for(c, project),
             apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
             manual_ranges_ms=[tuple(interval) for interval in c['ranges']], manual_plan=manual_plan(project, c)))
         os.replace(result.output_path, path)
@@ -869,6 +876,10 @@ def preview_ranges(c, render_transcript, style, at_ms):
         if group is not None:
             start = min(start, source(group.words[0].start_time_ms - origin) - 50)
             end = max(end, source(group.words[-1].end_time_ms - origin) + 50)
+    # A text overlay that appeared just before keeps its entrance animation.
+    for overlay in c.get('text_overlays') or []:
+        if overlay['start_ms'] <= at_ms < overlay['end_ms'] and at_ms - overlay['start_ms'] < 1000:
+            start = min(start, overlay['start_ms'] - 10)
     window = [[max(a, round(start)), min(b, round(end))] for a, b in ranges if b > start and a < end]
     window = [r for r in window if r[1] - r[0] >= 100 or r[0] <= at_ms < r[1]]
     piece = next((r for r in window if r[0] <= at_ms < r[1]), None)
@@ -906,6 +917,7 @@ async def preview_frame(run, project, c, source, transcript, at_ms, frame_id):
             transcript_segments=render_transcript, include_captions=c['captions'], caption_style=style,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
             caption_y=c.get('caption_y'), title_text=c['title'], include_title=c.get('title_card') is True,
+            text_overlays=text_overlays_for(c, project),
             apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
             manual_ranges_ms=[tuple(r) for r in window_ranges], manual_plan=manual_plan(project, window)))
         before = sum(min(r[1], at_ms) - r[0] for r in window_ranges if r[0] < at_ms)

@@ -242,3 +242,74 @@ test('captions: templates, custom style, saved presets, retimed and added lines,
   assert.ok(Math.max(magenta(1), magenta(1.6), magenta(2.2)) > 50, 'custom caption color in the exported MP4')
   assert.deepEqual(errors, [])
 })
+
+test('text overlays: add a hook and a text, edit, move by drag, and burn them into the export', { timeout: 420000 }, async (t) => {
+  const tools = editorTools(t, { python: true, captions: true })
+  if (!tools) return
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-edit-text-'))
+  const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, 'Library')
+  const original = path.join(root, 'source.mp4')
+  video(tools, original, 12)
+  const run = automaticRun(tools, library, 'text-run', original)
+  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: tools.python, openrouterApiKey: '', zernioApiKey: '' }))
+  const appDir = buildApp(path.join(root, 'app'))
+  linkEngine(appDir)
+  const session = await launchApp({ appDir, userDataDir, env: tools.appEnv })
+  t.after(async () => {
+    const stop = setTimeout(() => session.app.process().kill('SIGTERM'), 5000)
+    try { await session.close() } finally { clearTimeout(stop); fs.rmSync(root, { recursive: true, force: true }) }
+  })
+  const { app, page } = session
+  const shots = process.env.BRIDGECLIP_E2E_SHOTS
+  const errors = []; page.on('pageerror', (e) => errors.push(e.message))
+  page.setDefaultTimeout(20000)
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1500, 1000))
+  const saved = async () => {
+    await page.getByText('All changes saved', { exact: true }).waitFor()
+    return JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'), 'utf8')).candidates[0]
+  }
+  await page.getByRole('button', { name: /^Library/ }).click()
+  await page.getByRole('button', { name: 'Open Interview text-run', exact: true }).click()
+  await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Why it matters', exact: true }) }).getByRole('button', { name: 'Edit clip', exact: true }).click()
+  await page.getByRole('region', { name: 'Clip editor' }).waitFor({ timeout: 120000 })
+  await page.locator('.editor-tabs').getByRole('button', { name: 'Text', exact: true }).click()
+
+  await page.getByRole('button', { name: 'Add hook', exact: true }).click()
+  let candidate = await saved()
+  assert.equal(candidate.text_overlays.length, 1)
+  const hook = candidate.text_overlays[0]
+  assert.equal(hook.text, 'Why it matters'); assert.equal(hook.start_ms, candidate.ranges[0][0]); assert.equal(hook.background, '#FFE234')
+  await page.getByRole('textbox', { name: 'Overlay text', exact: true }).fill('Attends la fin')
+  await page.getByRole('combobox', { name: 'Overlay animation' }).selectOption('none')
+  // Drag the hook on the output preview: it moves down.
+  const onScreen = page.getByRole('button', { name: 'Text overlay: Attends la fin', exact: true })
+  const box = await onScreen.boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 60, { steps: 5 }); await page.mouse.up()
+  candidate = await saved()
+  assert.ok(candidate.text_overlays[0].y > .2, `moved down to ${candidate.text_overlays[0].y}`)
+  assert.equal(candidate.text_overlays[0].text, 'Attends la fin'); assert.equal(candidate.text_overlays[0].animation, 'none')
+  // A second, plain text later in the clip.
+  await page.getByRole('slider', { name: 'Source timeline', exact: true }).evaluate((el) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '4000')
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await page.getByRole('button', { name: 'Add text', exact: true }).click()
+  candidate = await saved()
+  assert.equal(candidate.text_overlays.length, 2); assert.equal(candidate.text_overlays[1].start_ms, 4000)
+  assert.equal(await page.locator('.editor-overlay-block').count(), 2, 'both on the text track')
+  if (shots) await page.screenshot({ path: path.join(shots, 'edit-text.png') })
+
+  await page.getByRole('button', { name: 'Export clip', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Exported “Why it matters” as a new clip/ }).waitFor({ timeout: 180000 })
+  const exported = JSON.parse(fs.readFileSync(path.join(run, 'job_output.json'), 'utf8')).clips.at(-1)
+  const yellow = (seconds) => {
+    const raw = execFileSync(tools.ffmpeg, ['-v', 'error', '-ss', String(seconds), '-i', exported.s3_url, '-frames:v', '1', '-vf', 'scale=270:480', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'])
+    let count = 0
+    for (let i = 0; i < raw.length; i += 3) if (Math.abs(raw[i] - 0xFF) < 20 && Math.abs(raw[i + 1] - 0xE2) < 20 && Math.abs(raw[i + 2] - 0x34) < 25) count++
+    return count
+  }
+  assert.ok(yellow(.5) > 400, 'hook plate burned in at the start')
+  assert.ok(yellow(3.5) < yellow(.5) / 4, 'hook gone after its 3 seconds')
+  assert.deepEqual(errors, [])
+})

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
+import { useMemo, useRef, type CSSProperties, type RefObject } from 'react'
+import { useMonitorBounds } from '../lib/monitor-bounds'
 import type { CandidateEdit, EditorProject } from '../../shared/clip-editor'
 import { effectiveCaptionStyle, type CaptionStyleValues } from '../../shared/caption-style'
 import { captionAnchor } from '../lib/caption-preview'
@@ -51,21 +52,8 @@ export function EditorCaptionPreview({ canvas, project, candidate, time, disable
   guide: boolean
   onMove: (y: number, remember: boolean) => void; onMoveX: (x: number, remember: boolean) => void; onDrag: (active: boolean) => void
 }): React.JSX.Element | null {
-  const [bounds, setBounds] = useState({ width: 0, height: 0, left: 0, top: 0 })
+  const bounds = useMonitorBounds(canvas, project.aspect_ratio)
   const drag = useRef<{ pointer: number; startX: number; startY: number; x: number; y: number; changed: boolean } | null>(null)
-  useEffect(() => {
-    const element = canvas.current, parent = element?.parentElement
-    if (!element || !parent) return
-    const measure = (): void => {
-      const box = element.getBoundingClientRect(), outer = parent.getBoundingClientRect()
-      const aspect = element.width / element.height
-      const width = Math.min(box.width, box.height * aspect), height = width / aspect
-      setBounds({ width, height, left: box.left - outer.left + (box.width - width) / 2, top: box.top - outer.top + (box.height - height) / 2 })
-    }
-    const observer = new ResizeObserver(measure)
-    observer.observe(element); observer.observe(parent); measure()
-    return () => observer.disconnect()
-  }, [canvas, project.aspect_ratio])
   const style = effectiveCaptionStyle(candidate.caption_preset, candidate.caption_style)
   const lines = useMemo(() => captionLines(project, candidate), [project, candidate])
   const suppressed = (candidate.caption_suppression_ranges ?? []).some(([a, b]) => a <= time && time < b)
