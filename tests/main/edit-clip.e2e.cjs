@@ -478,3 +478,80 @@ test('audio: import music, mute, volume, ducking and fades, preview playback, an
   assert.ok(fs.existsSync(music), 'the chosen music file is left where it was')
   assert.deepEqual(errors, [])
 })
+
+test('smart reframing: face tracking, auto, center and off as undoable edits, and manual crops', { timeout: 420000 }, async (t) => {
+  const tools = editorTools(t, { python: true, captions: true })
+  if (!tools) return
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-edit-reframe-'))
+  const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, 'Library')
+  const original = path.join(root, 'source.mp4')
+  video(tools, original, 12)
+  const run = automaticRun(tools, library, 'reframe-run', original)
+  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: tools.python, openrouterApiKey: '', zernioApiKey: '' }))
+  const appDir = buildApp(path.join(root, 'app'))
+  linkEngine(appDir)
+  const session = await launchApp({ appDir, userDataDir, env: tools.appEnv })
+  t.after(async () => {
+    const stop = setTimeout(() => session.app.process().kill('SIGTERM'), 5000)
+    try { await session.close() } finally { clearTimeout(stop); fs.rmSync(root, { recursive: true, force: true }) }
+  })
+  const { app, page } = session
+  const shots = process.env.BRIDGECLIP_E2E_SHOTS
+  const errors = []; page.on('pageerror', (e) => errors.push(e.message))
+  page.setDefaultTimeout(20000)
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1500, 1000))
+  const saved = async () => {
+    await page.getByText('All changes saved', { exact: true }).waitFor()
+    return JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'), 'utf8')).candidates[0]
+  }
+  const reframing = page.getByRole('region', { name: 'Smart reframing' })
+  await page.getByRole('button', { name: /^Library/ }).click()
+  await page.getByRole('button', { name: 'Open Interview reframe-run', exact: true }).click()
+  await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Why it matters', exact: true }) }).getByRole('button', { name: 'Edit clip', exact: true }).click()
+  await page.getByRole('region', { name: 'Clip editor' }).waitFor({ timeout: 120000 })
+  await page.locator('.editor-tabs').getByRole('button', { name: 'Framing', exact: true }).click()
+  await reframing.getByText('Manual', { exact: true }).waitFor()
+  const before = await saved()
+
+  // Face tracking runs the local detector; the test pattern has no people, so the crop stays centered full frame.
+  await reframing.getByRole('button', { name: 'Face tracking', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /^Face tracking: / }).waitFor({ timeout: 180000 })
+  let candidate = await saved()
+  assert.equal(candidate.reframe, 'face'); assert.equal(candidate.scenes[0].layout, 'fill'); assert.equal(candidate.scenes[0].at_ms, 0)
+  assert.ok(Math.abs(candidate.scenes[0].crops[0][0] + candidate.scenes[0].crops[0][2] / 2 - .5) < .01)
+  assert.deepEqual(fs.readdirSync(run).filter((f) => f.startsWith('editor-reframe-')), [], 'the analysis result is not left behind')
+  await reframing.getByText('Face tracking', { exact: true }).last().waitFor()
+
+  await reframing.getByRole('button', { name: 'Auto', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /^Auto: / }).waitFor({ timeout: 180000 })
+  candidate = await saved()
+  assert.equal(candidate.reframe, 'auto'); assert.equal(candidate.scenes[0].layout, 'fit', 'a screen without people is shown whole')
+
+  await reframing.getByRole('button', { name: 'Off', exact: true }).click()
+  candidate = await saved()
+  assert.equal(candidate.reframe, 'off'); assert.deepEqual(candidate.scenes.map((s) => s.layout), ['fit'])
+  await reframing.getByRole('button', { name: 'Center', exact: true }).click()
+  candidate = await saved()
+  assert.equal(candidate.reframe, 'center'); assert.deepEqual(candidate.scenes.map((s) => s.layout), ['fill'])
+  if (shots) await page.screenshot({ path: path.join(shots, 'edit-reframe.png') })
+
+  // Undo walks back through the modes to the original layouts.
+  for (const mode of ['off', 'auto', 'face']) {
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    candidate = await saved()
+    assert.equal(candidate.reframe, mode)
+  }
+  await page.getByRole('button', { name: 'Undo', exact: true }).click()
+  candidate = await saved()
+  assert.equal(candidate.reframe, undefined); assert.deepEqual(candidate.scenes, before.scenes)
+
+  // Moving a crop by hand after a mode switches to Manual.
+  await reframing.getByRole('button', { name: 'Center', exact: true }).click()
+  await saved()
+  const horizontal = page.getByRole('slider', { name: 'Horizontal crop position', exact: true })
+  await horizontal.focus(); await horizontal.press('ArrowRight')
+  candidate = await saved()
+  assert.equal(candidate.reframe, undefined)
+  await reframing.getByText('Manual', { exact: true }).waitFor()
+  assert.deepEqual(errors, [])
+})

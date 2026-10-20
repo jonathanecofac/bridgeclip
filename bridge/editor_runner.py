@@ -9,12 +9,12 @@ import signal
 from bridge_runner import reserve_stdout_for_protocol, emit
 
 logger = logging.getLogger('editor_runner')
-ACTIONS = ('review', 'export', 'replace-source', 'scan-cameras', 'create-project', 'preview-frame', 'import-music')
+ACTIONS = ('review', 'export', 'replace-source', 'scan-cameras', 'create-project', 'preview-frame', 'import-music', 'reframe')
 # Keep in sync with EDITOR_ERROR_CODES in manual_editor.py and editorErrorCodes
 # in src/shared/clip-editor.ts. Only these codes cross the bridge.
 ERROR_CODES = frozenset({'duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
     'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable',
-    'music_invalid', 'cancelled'})
+    'music_invalid', 'reframe_unavailable', 'cancelled'})
 
 
 def failure_code(error):

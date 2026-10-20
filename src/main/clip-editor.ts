@@ -1,11 +1,11 @@
 import { execFile, spawn, type ChildProcess } from 'child_process'
-import { constants, closeSync, createWriteStream, existsSync, fstatSync, linkSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
+import { constants, closeSync, createWriteStream, existsSync, fstatSync, linkSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
 import { open, type FileHandle } from 'fs/promises'
 import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, isAbsolute, join, win32 } from 'path'
 import { createHash, randomUUID } from 'crypto'
-import { EDITOR_REVISION_CONFLICT, EDITOR_SOURCE_UNAVAILABLE, editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
+import { EDITOR_REVISION_CONFLICT, EDITOR_SOURCE_UNAVAILABLE, candidateEdit, editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorScene, type EditorProject, type EditorSession } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
@@ -13,7 +13,7 @@ import { getBridgeRunnerPath, getEnginePath, resolvePythonPath, runtimeEnvironme
 import { resolveBinary } from './tools'
 import { logger } from './logger'
 
-type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source' | 'create-project' | 'preview-frame' | 'import-music'
+type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source' | 'create-project' | 'preview-frame' | 'import-music' | 'reframe'
 interface EditorOperation { progress?: EditorSession['progress']; action: NonNullable<EditorSession['operation']>; child?: ChildProcess; cancelled?: boolean; abort?: AbortController; batch?: EditorBatch }
 const operations = new Map<string, EditorOperation>()
 export function editorBusy(path: string): boolean { return operations.has(realpathSync(path)) }
@@ -56,6 +56,8 @@ const EDITOR_MEDIA = /^editor-(?:source|preview)(?:-[a-f0-9]{32})?\.mp4(?:\.part
 const EDITOR_FRAME = /^editor-frame-[a-f0-9]{32}\.png$/
 /** Imported background music. Kept while the project is editable (unsaved edits can refer to it); removed with editor media. */
 const EDITOR_MUSIC = /^editor-music-[a-f0-9]{32}\.mp4$/
+/** Smart reframing results, read once by main. */
+const EDITOR_REFRAME = /^editor-reframe-[a-f0-9]{32}\.json$/
 /**
  * Remove leftovers of killed or cancelled operations: `.editor-*` temp files and
  * folders, and editor media the project does not reference. Runs only while no
@@ -74,7 +76,7 @@ function sweepEditorFiles(run: string, project?: EditorProject): void {
   let removed = 0
   for (const entry of entries) {
     const temporary = entry.name.startsWith('.editor-')
-    const frame = (EDITOR_FRAME.test(entry.name) || (freed && EDITOR_MUSIC.test(entry.name))) && (entry.isFile() || entry.isSymbolicLink())
+    const frame = (EDITOR_FRAME.test(entry.name) || EDITOR_REFRAME.test(entry.name) || (freed && EDITOR_MUSIC.test(entry.name))) && (entry.isFile() || entry.isSymbolicLink())
     if (!temporary && !frame && !(keep && EDITOR_MEDIA.test(entry.name) && !keep.has(entry.name) && (entry.isFile() || entry.isSymbolicLink()))) continue
     try { rmSync(join(run, entry.name), { recursive: temporary && entry.isDirectory(), force: true }); removed++ } catch { /* A playing preview can stay open on Windows; retry next time. */ }
   }
@@ -148,7 +150,7 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
       if (!edit) throw new Error('Candidate is missing')
       const next = { ...c, ...edit }
       // Optional edit fields that were cleared (no overrides, no added captions, title card off).
-      for (const key of ['caption_style', 'caption_inserts', 'title_card', 'text_overlays', 'effects', 'audio'] as const) if (!(key in edit)) delete next[key]
+      for (const key of ['caption_style', 'caption_inserts', 'title_card', 'text_overlays', 'effects', 'audio', 'reframe'] as const) if (!(key in edit)) delete next[key]
       if (edit.status === 'baked') {
         // Unchanged since its render, or restored to the exact render "Refine again" left.
         const unchanged = c.status === 'baked' ? renderEditKey(edit) === renderEditKey(c) : !!c.baked_hash && c.exports.length > 0 && bakedHash(edit) === c.baked_hash
@@ -232,7 +234,7 @@ function runWorker(run: string, operation: EditorOperation, action: WorkerAction
       try {
         const value = JSON.parse(line)
         if (value?.type === 'progress') {
-          if ((action === 'scan-cameras' || (action === 'create-project' && value.phase === 'preview')) && (value.phase === 'scan' || value.phase === 'preview') &&
+          if ((action === 'scan-cameras' || action === 'reframe' || (action === 'create-project' && value.phase === 'preview')) && (value.phase === 'scan' || value.phase === 'preview') &&
               typeof value.percent === 'number' && Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) {
             const previous = operation.progress
             if (!previous || (previous.phase !== 'preview' && value.phase === 'preview') ||
@@ -538,6 +540,41 @@ export async function importEditorMusic(path: unknown, chosen: unknown): Promise
     logger.info('editor.music.imported')
     return { file, name, path: full }
   } finally {
+    operation.child = undefined
+    operations.delete(run)
+  }
+}
+
+/**
+ * Smart reframing: analyze faces over the clip with the local detector and
+ * return new layouts for the editor to apply as one undoable edit. Auto picks
+ * each shot's layout; Face tracking follows the speaker full frame.
+ */
+export async function reframeEditor(path: unknown, revision: unknown, candidateId: unknown, mode: unknown): Promise<{ scenes: EditorScene[] }> {
+  const run = runPath(path)
+  if (mode !== 'auto' && mode !== 'face') throw new Error('Invalid reframing mode')
+  if (operations.has(run) || operations.size >= 2) throw new Error('An editor operation is already running. Try again when it finishes.')
+  const operation: EditorOperation = { action: 'reframe', progress: { phase: 'scan', percent: 0 } }
+  operations.set(run, operation)
+  const id = randomUUID().replaceAll('-', '')
+  const file = join(run, `editor-reframe-${id}.json`)
+  try {
+    const session = await openEditor(run)
+    if (session.project.media_freed) throw new Error('Editor media was freed. This project is read-only.')
+    const candidate = session.project.candidates.find((c) => c.id === candidateId)
+    if (revision !== session.project.revision || !candidate) throw new Error('Project changed. Reopen it and retry.')
+    const settings = loadSettings()
+    const { env, python } = workerSetup(settings)
+    await runWorker(run, operation, 'reframe', env, python, workerLimitMs(candidate.ranges.at(-1)![1] - candidate.ranges[0][0]),
+      { run, library: realpathSync(settings.outputDirectory), revision, candidate_id: candidate.id, action: 'reframe', mode, reframe_id: id })
+    if (lstatSync(file).isSymbolicLink() || !isWithinDirectory(file, run) || statSync(file).size > 4 * 1024 * 1024) throw new Error(editorFailureMessage('reframe'))
+    const result = JSON.parse(readFileSync(file, 'utf8')) as { scenes?: unknown }
+    // The same validation as a save: the layouts must be a valid edit of this clip.
+    const { scenes } = parseCandidateEdit({ ...candidateEdit(candidate), scenes: result.scenes }, session.project.duration_ms, session.project.transcript.length)
+    logger.info('editor.reframe', { mode, scenes: scenes.length })
+    return { scenes }
+  } finally {
+    try { unlinkSync(file) } catch { /* Not written. */ }
     operation.child = undefined
     operations.delete(run)
   }

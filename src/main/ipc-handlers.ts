@@ -1,5 +1,5 @@
 import { openEditor, saveEditor, runEditor, cancelEditor, replaceEditorSource } from './clip-editor'
-import { editorCloseReady, freeEditorMedia, readEditorProgress, createEditorProject, readEditorOperation, previewEditorFrame, importEditorMusic } from './clip-editor'
+import { editorCloseReady, freeEditorMedia, readEditorProgress, createEditorProject, readEditorOperation, previewEditorFrame, importEditorMusic, reframeEditor } from './clip-editor'
 import { deleteCaptionPreset, listCaptionPresets, saveCaptionPreset } from './caption-presets-store'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
@@ -208,6 +208,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('editor:create', (_event, path: unknown, source: unknown) => createEditorProject(path, source))
   handle('editor:operation', (_event, path: unknown) => readEditorOperation(path))
   handle('editor:previewFrame', (_event, path: unknown, revision: unknown, id: unknown, at: unknown) => previewEditorFrame(path, revision, id, at))
+  handle('editor:reframe', (_event, path: unknown, revision: unknown, id: unknown, mode: unknown) => reframeEditor(path, revision, id, mode))
   handle('editor:importMusic', async (_event, path: unknown) => {
     const window = getMainWindow()
     if (!window) return null

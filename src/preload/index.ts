@@ -1,7 +1,7 @@
 import type { JevThresholdSettings } from '../shared/jev-settings'
 import type { LibraryClipTarget } from '../shared/library-posting'
 import type { AutomationReviewResult } from '../shared/automations'
-import type { CandidateEdit, EditorProgressSummary, EditorSession } from '../shared/clip-editor'
+import type { CandidateEdit, EditorProgressSummary, EditorScene, EditorSession } from '../shared/clip-editor'
 import type { CaptionStyleOverrides, UserCaptionPreset } from '../shared/caption-style'
 import type { JobOutput } from '../shared/job-output'
 import type { EditAudit } from '../shared/editorial'
@@ -133,6 +133,8 @@ export interface BridgeClipAPI {
     create: (path: string, source?: string | null) => Promise<EditorSession>
     /** Choose an audio file and import it as background music; null when the dialog is cancelled. */
     importMusic: (path: string) => Promise<{ file: string; name: string; path: string } | null>
+    /** Smart reframing (local face detection): new layouts for the candidate, not yet applied. */
+    reframe: (path: string, revision: number, id: string, mode: 'auto' | 'face') => Promise<{ scenes: EditorScene[] }>
     /** The running editor operation for a run, readable before it has a project. */
     operation: (path: string) => Promise<{ operation: EditorSession['operation']; progress?: EditorSession['progress'] }>
     /** The exported picture at a source time, rendered by the engine from the saved project. */
@@ -332,7 +334,8 @@ const api: BridgeClipAPI = {
     create: (path, source) => ipcRenderer.invoke('editor:create', path, source ?? null),
     operation: (path) => ipcRenderer.invoke('editor:operation', path),
     previewFrame: (path, revision, id, atMs) => ipcRenderer.invoke('editor:previewFrame', path, revision, id, atMs),
-    importMusic: (path) => ipcRenderer.invoke('editor:importMusic', path)
+    importMusic: (path) => ipcRenderer.invoke('editor:importMusic', path),
+    reframe: (path, revision, id, mode) => ipcRenderer.invoke('editor:reframe', path, revision, id, mode)
   },
   captionPresets: {
     list: () => ipcRenderer.invoke('captionPresets:list'),

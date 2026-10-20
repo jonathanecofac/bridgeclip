@@ -48,7 +48,11 @@ export interface CandidateEdit {
   effects?: Effects
   /** Voice level, mute, loudness normalization and background music. */
   audio?: AudioSettings
+  /** How the layouts were made by Smart reframing; absent once framing is edited by hand (Manual). */
+  reframe?: ReframeMode
 }
+export const REFRAME_MODES = ['auto', 'face', 'center', 'off'] as const
+export type ReframeMode = typeof REFRAME_MODES[number]
 export interface CaptionEdit { segment: number; text: string; start_ms?: number; end_ms?: number }
 export interface CaptionInsert { start_ms: number; end_ms: number; text: string }
 export interface EditorCandidate extends CandidateEdit {
@@ -72,7 +76,7 @@ export interface EditorProject {
   transcript: { start_ms: number; end_ms: number; text: string; words?: [number, number][] }[]
 }
 export interface EditorProgress { phase: 'scan' | 'preview' | 'source'; percent: number }
-export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | 'create-project' | 'preview-frame' | 'import-music'
+export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | 'create-project' | 'preview-frame' | 'import-music' | 'reframe'
 export interface EditorBatch { completed: number; total: number; failed?: number }
 export interface EditorSession {
   progress?: EditorProgress; project: EditorProject; sourcePath: string; previewPath: string
@@ -99,7 +103,7 @@ export const EDITOR_REVISION_CONFLICT = 'This project changed. Reopen it before 
 /** Fixed worker failure codes (see bridge/editor_runner.py); no tool output crosses the bridge. */
 export const editorErrorCodes = ['duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
   'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable',
-  'music_invalid', 'cancelled', 'timeout'] as const
+  'music_invalid', 'reframe_unavailable', 'cancelled', 'timeout'] as const
 export type EditorErrorCode = typeof editorErrorCodes[number]
 export function isEditorErrorCode(value: unknown): value is EditorErrorCode {
   return typeof value === 'string' && (editorErrorCodes as readonly string[]).includes(value)
@@ -126,6 +130,14 @@ export function editorFailureMessage(action: Exclude<EditorOperation, 'save'>, c
       : code === 'cancelled' ? 'Exact preview cancelled.'
       : code && common[code] ? common[code]!
       : `Could not render the exact preview. Your edits are saved. ${logs}`
+  }
+  if (action === 'reframe') {
+    return code === 'reframe_unavailable' ? 'Face detection is not available in this installation. Reinstall BridgeClip, or frame the clip with Center or by hand.'
+      : code === 'scan_too_long' ? 'This clip is too long to reframe automatically (20 minutes at most). Shorten it, or frame it by hand.'
+      : code === 'cancelled' ? 'Reframing cancelled. Your layouts are unchanged.'
+      : code === 'timeout' ? 'Reframing took too long and was stopped. Your layouts are unchanged.'
+      : code && common[code] ? `${common[code]} Your layouts are unchanged.`
+      : `Could not reframe this clip. Your layouts are unchanged. ${logs}`
   }
   if (action === 'import-music') {
     return code === 'music_invalid' ? "This audio file can't be used. Choose an MP3, WAV, M4A, AAC, OGG or FLAC file with sound."
@@ -259,6 +271,7 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
     ...(v.title_card === undefined ? {} : { title_card: typeof v.title_card === 'boolean' ? v.title_card : fail() }),
     ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}),
     ...(text_overlays?.length ? { text_overlays } : {}), ...(hasEffects(effects) ? { effects } : {}), ...(hasAudio(audio) ? { audio } : {}),
+    ...(v.reframe === undefined ? {} : { reframe: (REFRAME_MODES as readonly unknown[]).includes(v.reframe) ? v.reframe as ReframeMode : fail() }),
     ...(v.dismissed_camera_markers === undefined ? {} : { dismissed_camera_markers: [...new Set(arr(v.dismissed_camera_markers, 5000).map((t) => num(t, 0, duration)))].sort((a, b) => a - b) }) }
 }
 function question(value: unknown): EditorQuestion {
@@ -315,10 +328,10 @@ export function parseEditorProject(value: unknown): EditorProject {
     transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }
 export function candidateEdit(c: CandidateEdit): CandidateEdit {
-  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card, caption_style, caption_inserts, text_overlays, effects, audio } = c
+  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card, caption_style, caption_inserts, text_overlays, effects, audio, reframe } = c
   return { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges, caption_y: c.caption_y ?? null, ...(dismissed_camera_markers ? { dismissed_camera_markers } : {}), ...(title_card !== undefined ? { title_card } : {}),
     ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}),
-    ...(text_overlays?.length ? { text_overlays } : {}), ...(hasEffects(effects) ? { effects } : {}), ...(hasAudio(audio) ? { audio } : {}) }
+    ...(text_overlays?.length ? { text_overlays } : {}), ...(hasEffects(effects) ? { effects } : {}), ...(hasAudio(audio) ? { audio } : {}), ...(reframe ? { reframe } : {}) }
 }
 export function renderEditKey(c: CandidateEdit): string {
   return JSON.stringify({ ...candidateEdit(c), status: undefined, dismissed_camera_markers: undefined })

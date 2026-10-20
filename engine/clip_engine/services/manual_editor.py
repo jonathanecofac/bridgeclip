@@ -24,7 +24,7 @@ from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, PROBE_TIMEOU
 # Fixed failure codes; the only failure detail that crosses the bridge.
 EDITOR_ERROR_CODES = frozenset({'duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
     'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable',
-    'music_invalid'})
+    'music_invalid', 'reframe_unavailable'})
 
 
 class EditorError(ValueError):
@@ -569,6 +569,8 @@ def validate_candidate(c, duration, transcript_count=100000):
         raise ValueError('Invalid title card setting')
     if 'source_clip' in c and (type(c['source_clip']) is not int or not 0 <= c['source_clip'] <= 999):
         raise ValueError('Invalid source clip')
+    if 'reframe' in c and c['reframe'] not in ('auto', 'face', 'center', 'off'):
+        raise ValueError('Invalid reframing mode')
     suppressed = c.get('caption_suppression_ranges', [])
     if not isinstance(suppressed, list) or len(suppressed) > 200:
         raise ValueError('Invalid caption suppression ranges')
@@ -729,6 +731,9 @@ async def run_editor(config, progress=None):
         validate_candidate(c, project['duration_ms'], len(project['transcript']))
     with failure_code('source_missing'):
         source = str(local_file(run, media_name('source', project.get('source_id'))))
+    if config['action'] == 'reframe':
+        await reframe(run, project, c, source, config.get('mode'), config.get('reframe_id'), progress)
+        return  # The editor applies the layouts as an undoable edit.
     if config['action'] == 'scan-cameras':
         from clip_engine.services.camera_scan import scan_camera_changes
         def report(phase, percent):
@@ -810,6 +815,49 @@ def effects_for(c, project):
     from clip_engine.services.effects import describe, validate_effects
     effects = validate_effects(c.get('effects'), project['duration_ms'])
     return effects if describe(effects) else None
+
+
+MAX_REFRAME_MS = 20 * 60 * 1000
+
+
+async def reframe(run, project, c, source, mode, reframe_id, progress=None):
+    """Analyze faces over the clip and write editor-reframe-<id>.json with new layouts.
+
+    The project is not changed: the editor applies the layouts as one edit
+    that Undo reverts.
+    """
+    from clip_engine.config import LayoutStyle
+    from clip_engine.services.layout_analyzer import LayoutAnalyzer
+    from clip_engine.services.reframe import MODES, reframe_scenes
+    if mode not in MODES or not isinstance(reframe_id, str) or not re.fullmatch(r'[a-f0-9]{32}', reframe_id):
+        raise ValueError('Invalid reframe request')
+    a, b = c['ranges'][0][0], c['ranges'][-1][1]
+    if b - a > MAX_REFRAME_MS:
+        raise EditorError('scan_too_long', 'Clip is too long to reframe')
+    analyzer = LayoutAnalyzer()
+    if not analyzer.available:
+        raise EditorError('reframe_unavailable', 'Face detection is unavailable')
+    phases = {'Sampling faces': (0, 85), 'Refining face tracking': (85, 90), 'Checking shot layouts': (90, 100)}
+
+    def report(label, percent):
+        lo, hi = phases.get(label, (0, 100))
+        if progress:
+            progress({'phase': 'scan', 'percent': lo if percent is None else lo + (hi - lo) * max(0, min(100, percent)) / 100})
+    try:
+        with failure_code('source_incompatible'):
+            plan = await analyzer.analyze(source, a, b - a, project['width'], project['height'],
+                                          style=LayoutStyle.AUTO if mode == 'auto' else LayoutStyle.FILL,
+                                          vision=False, precise=True, progress=report)
+    finally:
+        await analyzer.close()
+    if plan is None:
+        raise EditorError('reframe_unavailable', 'Face analysis produced no plan')
+    aspect = 9 / 16 if project['aspect_ratio'] == '9:16' else 16 / 9
+    scenes = reframe_scenes(plan, a, b, project['width'], project['height'], aspect)
+    with failure_code('reframe_unavailable'):
+        validate_candidate({**c, 'scenes': scenes}, project['duration_ms'], len(project['transcript']))
+    faces = sum(1 for s in plan.shots if s.layout != 'screen')
+    atomic_json(run / f'editor-reframe-{reframe_id}.json', {'mode': mode, 'scenes': scenes, 'shots': len(plan.shots), 'shots_with_people': faces})
 
 
 def audio_for(run, project, c):

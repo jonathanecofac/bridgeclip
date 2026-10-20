@@ -195,3 +195,4 @@
 .editor-tabs::-webkit-scrollbar { display:none; }
 .editor-tabs button { flex:1 0 auto; padding-left:7px; padding-right:7px; }
 .editor-music-block { background:#7dd3c0cc; cursor:pointer; }
+.editor-reframe-mode { font-size:10px; font-weight:500; text-transform:none; letter-spacing:0; padding:1px 7px; border-radius:999px; background:rgb(var(--accent) / .15); color:rgb(var(--accent)); }
