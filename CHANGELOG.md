@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 ### Added
 
 - **Watched channels** (Watch in the sidebar): add a YouTube channel by its link or @handle, and BridgeClip checks it every few minutes while it is open. Each new upload is clipped once with that channel's own settings (what to clip, length, number of clips, format, captions). The clips stay in the Library or go to one of your **Automations**, which posts the best ones on its schedule. Videos already on the channel are left alone; Shorts, short videos and lives in progress are skipped or wait until they end; uploads made while BridgeClip was closed follow your choice (only the newest, all, the last 24 hours, or none). Any video can still be clipped by hand with **Clip this**.
@@ -132,7 +134,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.2.0
 [0.1.19]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.19
