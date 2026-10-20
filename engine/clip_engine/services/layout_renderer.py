@@ -589,6 +589,7 @@ def build_layout_graph(
     fps: str = "30",
     loudness_filter: Optional[str] = None,
     video_speed: float = 1.0,
+    audio_filters: str = "",
 ) -> str:
     """Filter graph from [0:v] (and [0:a]) to [base] (and [aout]).
 
@@ -657,6 +658,7 @@ def build_layout_graph(
         # doing it before AUDIO_SYNC would erase legitimate source offsets.
         parts.append(
             f"{inputs}concat=n={audio_n}:v=0:a=1,{loudness_filter or LOUDNESS_FILTER},"
+            f"{audio_filters + ',' if audio_filters else ''}"
             f"{speed_audio_filter(video_speed, sum(end - start for start, end in audio_keeps))}"
             "asettb=1/48000,asetpts=N[aout]"
         )

@@ -14,6 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 - **Exact preview** renders the frame at the playhead with the export engine, so captions, fonts, title card and framing look exactly as in the exported MP4.
 - The output preview shows the real captions at the playhead in the clip's style, plus the title card; drag the captions to place them.
 - **Text overlays and hooks** in the editor's new Text tab: add a text or a bold hook for the first seconds, set its timing, font, size, colors, outline, background and pop or fade animation, and drag it on the preview. Texts stay visible in caption-free sections and follow your cuts.
+- **Effects** tab in the editor: **Edit style** presets (Clean, Viral, Cinematic) that you apply yourself and can undo, playback speed from 0.5× (slow motion) to 2×, fade in and out from black, dip-to-black or white flash transitions at cuts, punch-in **Zoom** at the playhead, and **Looks** (brightness, contrast, saturation, sharpen, vignette) on any part of the timeline. Nothing is applied automatically.
 
 ## [0.2.0] - 2026-10-20
 

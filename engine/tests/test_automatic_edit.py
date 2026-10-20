@@ -206,10 +206,13 @@ def test_create_project_requires_the_linked_source(tmp_path):
     assert getattr(error.value, 'editor_code', None) == 'source_missing'
 
 
-def frame(path, at=None):
+def frame(path, at=None, fps=30):
+    """RGB pixels of the frame on screen at `at` seconds (the last one starting at or before it)."""
+    import math
     import numpy as np
-    args = ['ffmpeg', '-v', 'error', *(['-ss', f'{at:.3f}'] if at is not None else []), '-i', str(path), '-frames:v', '1',
-            '-vf', 'scale=540:960', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+    pick = f'select=eq(n\\,{math.floor(at * fps + 1e-3)}),' if at is not None else ''
+    args = ['ffmpeg', '-v', 'error', '-i', str(path), '-frames:v', '1',
+            '-vf', f'{pick}scale=540:960', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
     return np.frombuffer(subprocess.run(args, capture_output=True, check=True, timeout=60).stdout, dtype=np.uint8).reshape(960, 540, 3).astype(int)
 
 

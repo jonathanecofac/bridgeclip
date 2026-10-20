@@ -313,3 +313,74 @@ test('text overlays: add a hook and a text, edit, move by drag, and burn them in
   assert.ok(yellow(3.5) < yellow(.5) / 4, 'hook gone after its 3 seconds')
   assert.deepEqual(errors, [])
 })
+
+test('effects: edit styles with undo, punch-in zoom, a look, fades, slow motion, and a matching export', { timeout: 420000 }, async (t) => {
+  const tools = editorTools(t, { python: true, captions: true })
+  if (!tools) return
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-edit-effects-'))
+  const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, 'Library')
+  const original = path.join(root, 'source.mp4')
+  video(tools, original, 12)
+  const run = automaticRun(tools, library, 'effects-run', original)
+  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: tools.python, openrouterApiKey: '', zernioApiKey: '' }))
+  const appDir = buildApp(path.join(root, 'app'))
+  linkEngine(appDir)
+  const session = await launchApp({ appDir, userDataDir, env: tools.appEnv })
+  t.after(async () => {
+    const stop = setTimeout(() => session.app.process().kill('SIGTERM'), 5000)
+    try { await session.close() } finally { clearTimeout(stop); fs.rmSync(root, { recursive: true, force: true }) }
+  })
+  const { app, page } = session
+  const shots = process.env.BRIDGECLIP_E2E_SHOTS
+  const errors = []; page.on('pageerror', (e) => errors.push(e.message))
+  page.setDefaultTimeout(20000)
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1500, 1000))
+  const saved = async () => {
+    await page.getByText('All changes saved', { exact: true }).waitFor()
+    return JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'), 'utf8')).candidates[0]
+  }
+  const seekTo = (ms) => page.getByRole('slider', { name: 'Source timeline', exact: true }).evaluate((el, ms) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, String(ms))
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }, ms)
+  await page.getByRole('button', { name: /^Library/ }).click()
+  await page.getByRole('button', { name: 'Open Interview effects-run', exact: true }).click()
+  await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Why it matters', exact: true }) }).getByRole('button', { name: 'Edit clip', exact: true }).click()
+  await page.getByRole('region', { name: 'Clip editor' }).waitFor({ timeout: 120000 })
+  await page.locator('.editor-tabs').getByRole('button', { name: 'Effects', exact: true }).click()
+  const before = await saved()
+
+  // A one-click style, fully undoable.
+  await page.getByRole('button', { name: /^Viral Edit/ }).click()
+  let candidate = await saved()
+  assert.equal(candidate.caption_preset, 'hormozi'); assert.equal(candidate.effects.transition, 'flash'); assert.equal(candidate.video_speed, 1.1)
+  assert.ok(candidate.scenes.length > before.scenes.length, 'punch-in zooms added as layout changes')
+  await page.getByRole('button', { name: 'Undo', exact: true }).click()
+  candidate = await saved()
+  assert.equal(candidate.effects, undefined); assert.equal(candidate.caption_preset, before.caption_preset); assert.deepEqual(candidate.scenes, before.scenes)
+
+  // Build effects by hand: a punch-in zoom, a look on part of the clip, a fade in, slow motion.
+  await seekTo(2500)
+  await page.getByRole('button', { name: 'Punch-in zoom at playhead', exact: true }).click()
+  candidate = await saved()
+  assert.equal(candidate.scenes.length, before.scenes.length + 2)
+  await seekTo(3000)
+  await page.getByRole('button', { name: 'Look at playhead', exact: true }).click()
+  const brightness = page.getByRole('slider', { name: 'Brightness', exact: true })
+  await brightness.focus(); for (let i = 0; i < 20; i++) await brightness.press('ArrowRight')
+  const fadeIn = page.getByRole('slider', { name: 'Fade in', exact: true })
+  await fadeIn.focus(); for (let i = 0; i < 5; i++) await fadeIn.press('ArrowRight')
+  await page.getByRole('combobox', { name: 'Clip speed' }).selectOption('0.5')
+  candidate = await saved()
+  assert.equal(candidate.effects.fade_in_ms, 500); assert.equal(candidate.video_speed, .5)
+  assert.equal(candidate.effects.looks.length, 1); assert.equal(candidate.effects.looks[0].start_ms, 3000); assert.equal(candidate.effects.looks[0].brightness, .2)
+  if (shots) await page.screenshot({ path: path.join(shots, 'edit-effects.png') })
+
+  await page.getByRole('button', { name: 'Export clip', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Exported “Why it matters” as a new clip/ }).waitFor({ timeout: 240000 })
+  const exported = JSON.parse(fs.readFileSync(path.join(run, 'job_output.json'), 'utf8')).clips.at(-1)
+  const info = probe(tools, exported.s3_url)
+  const kept = candidate.ranges.reduce((n, [a, b]) => n + b - a, 0) / 1000
+  assert.ok(Math.abs(Number(info.format.duration) - kept / .5) < .2, `slow motion doubles ${kept}s to ${info.format.duration}s`)
+  assert.deepEqual(errors, [])
+})

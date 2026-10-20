@@ -191,3 +191,6 @@
 .editor-overlay-blocks { position:relative; height:18px; margin-top:5px; border-radius:3px; background:#ffffff06; }
 .editor-overlay-block { position:absolute; top:1px; bottom:1px; min-width:3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding:0 4px; font-size:9px; line-height:16px; text-align:left; border-radius:3px; color:#1a1230; background:#c3a2facc; cursor:grab; touch-action:none; }
 .editor-overlay-block.selected { outline:2px solid white; }
+.editor-tabs { overflow-x:auto; scrollbar-width:none; }
+.editor-tabs::-webkit-scrollbar { display:none; }
+.editor-tabs button { flex:1 0 auto; padding-left:7px; padding-right:7px; }

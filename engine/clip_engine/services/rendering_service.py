@@ -104,6 +104,11 @@ class RenderRequest:
     caption_y: Optional[float] = None
     # Editor text overlays and hooks (text_overlays.validate_text_overlays), in source time.
     text_overlays: list[dict] = field(default_factory=list)
+    # Editor effects (effects.validate_effects). A window render (exact preview)
+    # turns off the clip fades it does not contain.
+    effects: Optional[dict] = None
+    effects_fade_in: bool = True
+    effects_fade_out: bool = True
 
     title_text: Optional[str] = None
     # Off keeps title_text for editorial review but draws no title card.
@@ -553,11 +558,21 @@ class RenderingService:
     ) -> None:
         """Build the graph, captions and overlays for one edit and run FFmpeg."""
         has_audio = request.include_audio and await self._has_audio(request.video_path)
+        from clip_engine.services.effects import audio_fade_filters, look_filters, picture_filters
+        effects = request.effects
         graph = build_layout_graph(
             plan, target_width, target_height, time_map.keeps, has_audio, landscape=is_landscape,
             fps=fps, loudness_filter=loudness_filter,
             video_speed=request.video_speed,
+            audio_filters=audio_fade_filters(effects, request.video_speed, time_map.output_ms,
+                                             request.effects_fade_in, request.effects_fade_out) if effects else "",
         )
+        looks = look_filters(effects["looks"], window_start_ms, time_map) if effects else ""
+        if looks:
+            # Grade the picture before captions and text, which keep their own colors.
+            if graph.count("[base]") != 1:
+                raise RenderingError("Unexpected layout graph")
+            graph = graph.replace("[base]", "[ungraded]") + f";[ungraded]{looks}[base]"
         out_plan = remap_plan(plan, time_map)
         caption_path = await self._generate_captions(
             request, target_width, target_height, window_start_ms, time_map, out_plan, is_landscape, plan,
@@ -575,8 +590,11 @@ class RenderingService:
         overlays = self._overlays(request, out_plan, target_width, target_height, is_landscape)
         # Burn captions and animate framing/overlays on the edited source clock,
         # then speed up the entire composited picture to match the tempo audio.
+        picture = picture_filters(effects, time_map.keeps, request.video_speed, time_map.output_ms,
+                                  request.effects_fade_in, request.effects_fade_out) if effects else ""
+        speed = speed_video_filter(request.video_speed, fps, scaled_duration_ms(time_map.output_ms, request.video_speed))
         filter_complex, extra_inputs = self._compose_overlays(
-            graph, overlays, speed_video_filter(request.video_speed, fps),
+            graph, overlays, f"{speed},{picture}" if picture else speed,
         )
 
         try:

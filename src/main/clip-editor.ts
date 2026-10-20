@@ -145,7 +145,7 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
       if (!edit) throw new Error('Candidate is missing')
       const next = { ...c, ...edit }
       // Optional edit fields that were cleared (no overrides, no added captions, title card off).
-      for (const key of ['caption_style', 'caption_inserts', 'title_card', 'text_overlays'] as const) if (!(key in edit)) delete next[key]
+      for (const key of ['caption_style', 'caption_inserts', 'title_card', 'text_overlays', 'effects'] as const) if (!(key in edit)) delete next[key]
       if (edit.status === 'baked') {
         // Unchanged since its render, or restored to the exact render "Refine again" left.
         const unchanged = c.status === 'baked' ? renderEditKey(edit) === renderEditKey(c) : !!c.baked_hash && c.exports.length > 0 && bakedHash(edit) === c.baked_hash

@@ -22,7 +22,16 @@ def test_engine_rejects_invalid_speed(speed):
     with pytest.raises(ValueError, match="Video speed"):
         ClippingJobRequest(video_url="source.mp4", video_speed=speed)
     with pytest.raises(ValueError, match="Video speed"):
-        validate_video_speed(speed)
+        validate_video_speed(speed, minimum=1)
+    if speed != 0.5:
+        with pytest.raises(ValueError, match="Video speed"):
+            validate_video_speed(speed)
+
+
+def test_editor_allows_slow_motion_down_to_half_speed():
+    assert validate_video_speed(0.5) == 0.5
+    with pytest.raises(ValueError):
+        validate_video_speed(0.49)
 
 
 def test_subtitles_and_chapters_share_the_sped_up_edited_timeline(tmp_path, monkeypatch):

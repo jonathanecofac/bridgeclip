@@ -558,7 +558,7 @@ def validate_candidate(c, duration, transcript_count=100000):
         for x, y, w, h in s['crops']:
             if not all(number(n, 0, 1) for n in (x, y, w, h)) or min(w, h) < .01 or x + w > 1.000001 or y + h > 1.000001:
                 raise ValueError('Invalid crop')
-    if not number(c['video_speed'], 1, 2) or type(c['captions']) is not bool:
+    if not number(c['video_speed'], .5, 2) or type(c['captions']) is not bool:
         raise ValueError('Invalid export settings')
     if c.get('caption_y') is not None and not number(c['caption_y'], .1, .9):
         raise ValueError('Invalid caption position')
@@ -607,6 +607,8 @@ def validate_candidate(c, duration, transcript_count=100000):
     validate_caption_overrides(c.get('caption_style'))
     from clip_engine.services.text_overlays import validate_text_overlays
     validate_text_overlays(c.get('text_overlays'), duration)
+    from clip_engine.services.effects import validate_effects
+    validate_effects(c.get('effects'), duration)
 
 
 def _spread(tokens, start, end):
@@ -798,6 +800,12 @@ async def run_editor(config, progress=None):
     atomic_json(run / 'editor-project.json', project)
 
 
+def effects_for(c, project):
+    from clip_engine.services.effects import describe, validate_effects
+    effects = validate_effects(c.get('effects'), project['duration_ms'])
+    return effects if describe(effects) else None
+
+
 def text_overlays_for(c, project):
     from clip_engine.services.text_overlays import validate_text_overlays
     return validate_text_overlays(c.get('text_overlays'), project['duration_ms'])
@@ -828,7 +836,7 @@ async def export_clip(run, project, c, output, source, transcript):
             transcript_segments=render_transcript, include_captions=c['captions'], caption_style=caption_style_for(c['caption_preset'], c.get('caption_style')),
             title_text=c['title'], include_title=c.get('title_card') is True,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
-            caption_y=c.get('caption_y'), text_overlays=text_overlays_for(c, project),
+            caption_y=c.get('caption_y'), text_overlays=text_overlays_for(c, project), effects=effects_for(c, project),
             apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
             manual_ranges_ms=[tuple(interval) for interval in c['ranges']], manual_plan=manual_plan(project, c)))
         os.replace(result.output_path, path)
@@ -845,7 +853,7 @@ async def export_clip(run, project, c, output, source, transcript):
 PREVIEW_BEFORE_MS, PREVIEW_AFTER_MS = 1200, 300
 
 
-def preview_ranges(c, render_transcript, style, at_ms):
+def preview_ranges(c, render_transcript, style, at_ms, bounds=None):
     """The cuts to render so the frame at `at_ms` matches the full export.
 
     Captions are grouped from the start of the clip, so the window starts at
@@ -854,10 +862,11 @@ def preview_ranges(c, render_transcript, style, at_ms):
     keeps unspoken words, the group's layout and its animation identical.
     """
     from clip_engine.services.clip_editor import TimeMap, remap_segments
-    from clip_engine.services.caption_generator import CaptionGeneratorService
+    from clip_engine.services.caption_generator import MAX_LINGER_MS, CaptionGeneratorService
     ranges = c['ranges']
     origin = ranges[0][0]
     start, end = at_ms - PREVIEW_BEFORE_MS, at_ms + PREVIEW_AFTER_MS
+    floor, ceiling = None, at_ms - 100
     if c['captions'] and style.word_by_word_highlight:
         keeps = [(a - origin, b - origin) for a, b in ranges]
         time_map = TimeMap(keeps, ranges[-1][1] - origin)
@@ -865,7 +874,6 @@ def preview_ranges(c, render_transcript, style, at_ms):
         words = [w for w in words if w.end_time_ms > origin and w.start_time_ms < origin + time_map.output_ms]
         groups = CaptionGeneratorService()._group_words(words, style.max_words_per_line)
         now = time_map.to_output(at_ms - origin)
-        group = next((g for g in reversed(groups) if now is not None and g.words[0].start_time_ms - origin <= now), None)
 
         def source(output_ms):
             for (a, b), (ka, kb) in zip(ranges, keeps):
@@ -873,13 +881,53 @@ def preview_ranges(c, render_transcript, style, at_ms):
                 if offset is not None and output_ms <= offset + (kb - ka):
                     return a + max(0, output_ms - offset)
             return ranges[-1][1]
-        if group is not None:
-            start = min(start, source(group.words[0].start_time_ms - origin) - 50)
-            end = max(end, source(group.words[-1].end_time_ms - origin) + 50)
+
+        def visible(index):
+            """Whether any of the group's caption events covers `now` (CaptionGeneratorService rules)."""
+            group = groups[index].words
+            following = groups[index + 1].words[0].start_time_ms if index + 1 < len(groups) else None
+            last = group[-1].end_time_ms + MAX_LINGER_MS
+            group_end = min(following, last) if following is not None else last
+            for i, word in enumerate(group):
+                word_end = group[i + 1].start_time_ms if i + 1 < len(group) else group_end
+                if word.start_time_ms <= now + origin < word_end:
+                    return True
+            return False
+        shown = [i for i in range(len(groups)) if now is not None and visible(i)]
+        if shown:
+            first_group = groups[shown[0]].words
+            first = next(i for i, w in enumerate(words) if w is first_group[0])
+            group_start = source(first_group[0].start_time_ms - origin)
+            start = min(start, group_start - 50)
+            end = max(end, max(source(groups[i].words[-1].end_time_ms - origin) for i in shown) + 50)
+            # Every word of the groups on screen must be in the window (it ends
+            # after the window start) and every earlier word must not, or the
+            # grouping would shift.
+            needed = min(source(w.end_time_ms - origin) for i in shown for w in groups[i].words)
+            ceiling = min(ceiling, group_start - 1, needed - 1)
+            floor = max((source(w.end_time_ms - origin) for w in words[:first]), default=None)
+            if floor is not None:
+                start = max(start, floor)
+    # Fades and cut transitions depend on the clip's edges and joins.
+    effects = c.get('effects') or {}
+    speed = c['video_speed']
+    if effects.get('fade_in_ms') and at_ms - ranges[0][0] <= effects['fade_in_ms'] * speed + 50:
+        start = ceiling = ranges[0][0]
+    if effects.get('fade_out_ms') and ranges[-1][1] - at_ms <= effects['fade_out_ms'] * speed + 50:
+        end = ranges[-1][1]
+    if effects.get('transition', 'none') != 'none':
+        start, end = min(start, at_ms - 1100), max(end, at_ms + 1100)
     # A text overlay that appeared just before keeps its entrance animation.
     for overlay in c.get('text_overlays') or []:
         if overlay['start_ms'] <= at_ms < overlay['end_ms'] and at_ms - overlay['start_ms'] < 1000:
             start = min(start, overlay['start_ms'] - 10)
+            ceiling = min(ceiling, overlay['start_ms'])
+    if floor is not None and (start < floor or floor > ceiling):
+        # No window both includes what decides this frame and leaves out what
+        # must not be there: render from the clip start, which is the export.
+        start, floor, ceiling = ranges[0][0], None, ranges[0][0]
+    if bounds is not None:
+        bounds.update(floor=floor, ceiling=max(ceiling, start))
     window = [[max(a, round(start)), min(b, round(end))] for a, b in ranges if b > start and a < end]
     window = [r for r in window if r[1] - r[0] >= 100 or r[0] <= at_ms < r[1]]
     piece = next((r for r in window if r[0] <= at_ms < r[1]), None)
@@ -887,6 +935,54 @@ def preview_ranges(c, render_transcript, style, at_ms):
         piece[1] = min(next(b for a, b in ranges if a <= at_ms < b), piece[0] + 100)
         piece[0] = min(piece[0], piece[1] - 100)
     return window
+
+
+def align_window(ranges, window, fps, speed, floor=None, ceiling=None):
+    """Start the window on the export's frame grid, so its frames are the export's frames.
+
+    The window start's offset in the edit must be a whole number of frames
+    before speed (layout composition) and after it (output), and a whole
+    number of milliseconds, since cut points are in ms: otherwise a clip that
+    starts between two source frames would pick the neighboring frame.
+    """
+    from fractions import Fraction
+    try:
+        frame_ms = Fraction(1000) / Fraction(str(fps))
+        pace = Fraction(str(speed)).limit_denominator(1000)
+    except (ValueError, ZeroDivisionError):
+        return window
+    frames = next((n for n in range(1, 241) if (n * frame_ms).denominator == 1 and (n / pace).denominator == 1), None)
+    if frames is None:
+        return window
+    grid = int(frames * frame_ms)
+    edited, offset = 0, None
+    for a, b in ranges:
+        if a <= window[0][0] <= b:
+            offset = edited + window[0][0] - a
+            break
+        edited += b - a
+    if offset is None:
+        return window
+
+    def source(edited_ms):
+        edited = 0
+        for a, b in ranges:
+            if edited_ms <= edited + (b - a):
+                return a + edited_ms - edited
+            edited += b - a
+        return None
+    # The grid point at or before the window start, unless that reaches back
+    # past `floor`: then the next one, if it is still no later than `ceiling`.
+    snapped = offset // grid * grid
+    start = source(snapped)
+    if start is not None and floor is not None and start < floor:
+        later = source(snapped + grid)
+        if later is not None and (ceiling is None or later <= ceiling):
+            start = later
+    if start is None:
+        return window
+    end = window[-1][1]
+    return [[max(a, start), min(b, end)] for a, b in ranges if b > start and a < end]
 
 
 async def preview_frame(run, project, c, source, transcript, at_ms, frame_id):
@@ -905,11 +1001,15 @@ async def preview_frame(run, project, c, source, transcript, at_ms, frame_id):
     from clip_engine.config import caption_style_for
     style = caption_style_for(c['caption_preset'], c.get('caption_style'))
     render_transcript = caption_transcript(transcript, c.get('caption_edits', []), c.get('caption_inserts', []))
-    window_ranges = preview_ranges(c, render_transcript, style, at_ms)
-    a, b = window_ranges[0][0], window_ranges[-1][1]
-    window = {**c, 'ranges': window_ranges}
+    bounds = {}
+    window_ranges = preview_ranges(c, render_transcript, style, at_ms, bounds)
     with failure_code('engine_unavailable'):
         renderer = RenderingService()
+    with failure_code('source_incompatible'):
+        fps = await renderer._probe_fps(source)
+    window_ranges = align_window(c['ranges'], window_ranges, fps, c['video_speed'], bounds.get('floor'), bounds.get('ceiling'))
+    a, b = window_ranges[0][0], window_ranges[-1][1]
+    window = {**c, 'ranges': window_ranges}
     target = run / f'editor-frame-{frame_id}.png'
     with tempfile.TemporaryDirectory(prefix='.editor-preview-', dir=run) as work, failure_code('render_failed'):
         result = await renderer.render_clip(RenderRequest(video_path=source, output_path=str(Path(work) / 'window.mp4'),
@@ -917,12 +1017,20 @@ async def preview_frame(run, project, c, source, transcript, at_ms, frame_id):
             transcript_segments=render_transcript, include_captions=c['captions'], caption_style=style,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
             caption_y=c.get('caption_y'), title_text=c['title'], include_title=c.get('title_card') is True,
-            text_overlays=text_overlays_for(c, project),
+            text_overlays=text_overlays_for(c, project), effects=effects_for(c, project),
+            effects_fade_in=window_ranges[0][0] == c['ranges'][0][0], effects_fade_out=window_ranges[-1][1] == c['ranges'][-1][1],
             apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
             manual_ranges_ms=[tuple(r) for r in window_ranges], manual_plan=manual_plan(project, window)))
         before = sum(min(r[1], at_ms) - r[0] for r in window_ranges if r[0] < at_ms)
         offset = max(0, before / c['video_speed'] / 1000)
+        # The frame on screen at the playhead: the last one that starts at or before it.
+        from fractions import Fraction
+        index = math.floor(offset * Fraction(str(fps)) + Fraction(1, 1000))
         partial = Path(work) / 'frame.png'
-        await asyncio.to_thread(run_media, ['ffmpeg', '-v', 'error', '-y', '-ss', f'{offset:.3f}', '-i', result.output_path,
-            '-frames:v', '1', '-vf', 'scale=-2:960', str(partial)], timeout=120, check=True)
+        await asyncio.to_thread(run_media, ['ffmpeg', '-v', 'error', '-y', '-i', result.output_path,
+            '-vf', f'select=eq(n\\,{index}),scale=-2:960', '-frames:v', '1', str(partial)], timeout=120, check=True)
+        if not partial.is_file():
+            # The playhead is on the clip's last frame: seeking lands just past it.
+            await asyncio.to_thread(run_media, ['ffmpeg', '-v', 'error', '-y', '-sseof', '-0.5', '-i', result.output_path,
+                '-vf', 'scale=-2:960', '-update', '1', str(partial)], timeout=120, check=True)
         os.replace(partial, target)

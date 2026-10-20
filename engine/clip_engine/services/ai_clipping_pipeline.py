@@ -125,7 +125,7 @@ class ClippingJobRequest:
     caption_preset: str = 'pop'
 
     def __post_init__(self):
-        validate_video_speed(self.video_speed)
+        validate_video_speed(self.video_speed, minimum=1)
         # Blank means no request, so the run and its no-match error agree with the planner.
         self.clip_request = (self.clip_request or '').strip()[:MAX_CLIP_REQUEST_CHARS] or None
         if self.job_id is None:
