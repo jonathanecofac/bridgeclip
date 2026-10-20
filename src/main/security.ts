@@ -22,7 +22,7 @@ export function isWebUrl(value: unknown): value is string {
 
 const externalLinks = new Set([JEV_DOCS_URL, JEV_CONFIDENCE_URL, BRIDGEMIND_URL, DISCORD_URL, ISSUES_URL, RELEASES_URL, REPO_URL, ...Object.values(PROVIDER_LINKS), ...Object.values(ZERNIO_LINKS)])
 export function isTrustedExternalUrl(value: unknown): value is string {
-  return isWebUrl(value) && (externalLinks.has(value) || /^https:\/\/www\.youtube\.com\/watch\?v=[\w-]{11}$/.test(value))
+  return isWebUrl(value) && (externalLinks.has(value) || (/^https:\/\/www\.youtube\.com\/watch\?v=[\w-]{11}$/.test(value) || /^https:\/\/www\.youtube\.com\/channel\/UC[\w-]{22}$/.test(value)))
 }
 
 export function isWithinDirectory(path: string, directory: string): boolean {

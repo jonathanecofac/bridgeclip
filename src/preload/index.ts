@@ -2,6 +2,7 @@ import type { JevThresholdSettings } from '../shared/jev-settings'
 import type { LibraryClipTarget } from '../shared/library-posting'
 import type { AutomationReviewResult } from '../shared/automations'
 import type { CandidateEdit, EditorProgressSummary, EditorScene, EditorSession } from '../shared/clip-editor'
+import type { WatchChannelUpdate, WatchClipSettings, WatchState } from '../shared/watched-channels'
 import type { CaptionStyleOverrides, UserCaptionPreset } from '../shared/caption-style'
 import type { JobOutput } from '../shared/job-output'
 import type { EditAudit } from '../shared/editorial'
@@ -139,6 +140,18 @@ export interface BridgeClipAPI {
     operation: (path: string) => Promise<{ operation: EditorSession['operation']; progress?: EditorSession['progress'] }>
     /** The exported picture at a source time, rendered by the engine from the saved project. */
     previewFrame: (path: string, revision: number, id: string, atMs: number) => Promise<{ path: string }>
+  }
+  /** Watched YouTube channels: new uploads are clipped with each channel's settings. */
+  watch: {
+    state: () => Promise<WatchState>
+    setEnabled: (enabled: boolean) => Promise<WatchState>
+    setInterval: (minutes: number) => Promise<WatchState>
+    add: (channel: string, settings?: WatchClipSettings) => Promise<WatchState>
+    update: (id: string, patch: WatchChannelUpdate) => Promise<WatchState>
+    remove: (id: string) => Promise<WatchState>
+    check: (id?: string) => Promise<WatchState>
+    clip: (id: string, videoId: string) => Promise<WatchState>
+    onUpdate: (callback: (state: WatchState) => void) => () => void
   }
   captionPresets: {
     list: () => Promise<UserCaptionPreset[]>
@@ -336,6 +349,17 @@ const api: BridgeClipAPI = {
     previewFrame: (path, revision, id, atMs) => ipcRenderer.invoke('editor:previewFrame', path, revision, id, atMs),
     importMusic: (path) => ipcRenderer.invoke('editor:importMusic', path),
     reframe: (path, revision, id, mode) => ipcRenderer.invoke('editor:reframe', path, revision, id, mode)
+  },
+  watch: {
+    state: () => ipcRenderer.invoke('watch:state'),
+    setEnabled: (enabled) => ipcRenderer.invoke('watch:setEnabled', enabled),
+    setInterval: (minutes) => ipcRenderer.invoke('watch:setInterval', minutes),
+    add: (channel, settings) => ipcRenderer.invoke('watch:add', channel, settings ?? null),
+    update: (id, patch) => ipcRenderer.invoke('watch:update', id, patch),
+    remove: (id) => ipcRenderer.invoke('watch:remove', id),
+    check: (id) => ipcRenderer.invoke('watch:check', id ?? null),
+    clip: (id, videoId) => ipcRenderer.invoke('watch:clip', id, videoId),
+    onUpdate: (callback) => subscribe('watch:update', callback)
   },
   captionPresets: {
     list: () => ipcRenderer.invoke('captionPresets:list'),

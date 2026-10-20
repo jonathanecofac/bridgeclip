@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+### Added
+
+- **Watched channels** (Watch in the sidebar): add a YouTube channel by its link or @handle, and BridgeClip checks it every few minutes while it is open. Each new upload is clipped once with that channel's own settings (what to clip, length, number of clips, format, captions). The clips stay in the Library or go to one of your **Automations**, which posts the best ones on its schedule. Videos already on the channel are left alone; Shorts, short videos and lives in progress are skipped or wait until they end; uploads made while BridgeClip was closed follow your choice (only the newest, all, the last 24 hours, or none). Any video can still be clipped by hand with **Clip this**.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added
