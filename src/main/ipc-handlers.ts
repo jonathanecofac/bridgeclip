@@ -1,5 +1,5 @@
 import { openEditor, saveEditor, runEditor, cancelEditor, replaceEditorSource } from './clip-editor'
-import { editorCloseReady, freeEditorMedia, readEditorProgress, createEditorProject, readEditorOperation, previewEditorFrame } from './clip-editor'
+import { editorCloseReady, freeEditorMedia, readEditorProgress, createEditorProject, readEditorOperation, previewEditorFrame, importEditorMusic } from './clip-editor'
 import { deleteCaptionPreset, listCaptionPresets, saveCaptionPreset } from './caption-presets-store'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
@@ -208,6 +208,17 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('editor:create', (_event, path: unknown, source: unknown) => createEditorProject(path, source))
   handle('editor:operation', (_event, path: unknown) => readEditorOperation(path))
   handle('editor:previewFrame', (_event, path: unknown, revision: unknown, id: unknown, at: unknown) => previewEditorFrame(path, revision, id, at))
+  handle('editor:importMusic', async (_event, path: unknown) => {
+    const window = getMainWindow()
+    if (!window) return null
+    const result = await dialog.showOpenDialog(window, {
+      properties: ['openFile'],
+      title: 'Choose background music',
+      filters: [{ name: 'Audio', extensions: ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'oga', 'opus', 'flac', 'mp4'] }, { name: 'All Files', extensions: ['*'] }]
+    })
+    if (result.canceled || !result.filePaths.length) return null
+    return importEditorMusic(path, result.filePaths[0])
+  })
   handle('captionPresets:list', () => listCaptionPresets())
   handle('captionPresets:save', (_event, name: unknown, base: unknown, style: unknown) => saveCaptionPreset(name, base, style))
   handle('captionPresets:delete', (_event, id: unknown) => deleteCaptionPreset(id))

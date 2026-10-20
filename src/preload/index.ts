@@ -131,6 +131,8 @@ export interface BridgeClipAPI {
     closeReady: (saved: boolean) => Promise<void>
     /** Make an Automatic run editable ("Edit clip"). `source` is a video chosen with dialog.selectVideo when the original is missing. */
     create: (path: string, source?: string | null) => Promise<EditorSession>
+    /** Choose an audio file and import it as background music; null when the dialog is cancelled. */
+    importMusic: (path: string) => Promise<{ file: string; name: string; path: string } | null>
     /** The running editor operation for a run, readable before it has a project. */
     operation: (path: string) => Promise<{ operation: EditorSession['operation']; progress?: EditorSession['progress'] }>
     /** The exported picture at a source time, rendered by the engine from the saved project. */
@@ -329,7 +331,8 @@ const api: BridgeClipAPI = {
     closeReady: (saved) => ipcRenderer.invoke('editor:closeReady', saved),
     create: (path, source) => ipcRenderer.invoke('editor:create', path, source ?? null),
     operation: (path) => ipcRenderer.invoke('editor:operation', path),
-    previewFrame: (path, revision, id, atMs) => ipcRenderer.invoke('editor:previewFrame', path, revision, id, atMs)
+    previewFrame: (path, revision, id, atMs) => ipcRenderer.invoke('editor:previewFrame', path, revision, id, atMs),
+    importMusic: (path) => ipcRenderer.invoke('editor:importMusic', path)
   },
   captionPresets: {
     list: () => ipcRenderer.invoke('captionPresets:list'),

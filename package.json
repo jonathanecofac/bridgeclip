@@ -33,7 +33,7 @@
     "icons": "bash scripts/icon/build-icons.sh",
     "test:bridge": "node scripts/run-bridge-tests.cjs",
     "test:release": "node --test scripts/*.test.cjs",
-    "test:renderer": "node --test tests/renderer-caption-words.test.cjs tests/renderer-state.test.cjs tests/create-form.test.cjs tests/opus-clip.test.cjs tests/audit-renderer.test.cjs",
+    "test:renderer": "node --test tests/renderer-caption-words.test.cjs tests/renderer-audio.test.cjs tests/renderer-state.test.cjs tests/create-form.test.cjs tests/opus-clip.test.cjs tests/audit-renderer.test.cjs",
     "test:main": "node --test tests/main/*.test.cjs",
     "test:zernio": "node --test tests/zernio/*.test.cjs",
     "test:e2e": "node --test --test-concurrency=1 tests/main/local-file.e2e.cjs tests/main/jobs-library.e2e.cjs tests/main/library-bookmarks.e2e.cjs tests/main/job-progress.e2e.cjs tests/main/delete-clips.e2e.cjs tests/main/edit-details.e2e.cjs tests/main/clip-editor.e2e.cjs tests/main/edit-clip.e2e.cjs tests/main/camera-changes.e2e.cjs tests/main/video-speed.e2e.cjs tests/main/workflow-choice.e2e.cjs tests/main/youtube-preview.e2e.cjs tests/main/caption-preview.e2e.cjs tests/main/caption-position.e2e.cjs tests/main/advanced-models.e2e.cjs tests/main/updates.e2e.cjs tests/main/changelog.e2e.cjs tests/main/zoom.e2e.cjs tests/zernio/e2e/accounts.e2e.cjs tests/zernio/e2e/automations.e2e.cjs tests/zernio/posts.e2e.cjs",

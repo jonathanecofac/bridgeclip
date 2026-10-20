@@ -1,23 +1,11 @@
-import { useRef, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Plus, Sparkles, Trash2 } from 'lucide-react'
 import { CAPTION_FONTS } from '../../shared/caption-style'
 import { MAX_TEXT_OVERLAYS, newHook, newTextOverlay, type TextOverlay } from '../../shared/text-overlays'
 import { cn } from '../lib/utils'
 import { Button } from './ui/Button'
+import { Group, Range } from './EditorControls'
 import { Switch } from './ui/Switch'
-
-function Range({ label, value, min, max, step = 1, format, onChange }: {
-  label: string; value: number; min: number; max: number; step?: number; format?: (v: number) => string
-  onChange: (value: number, remember: boolean) => void
-}): React.JSX.Element {
-  const first = useRef(true)
-  return <label className="editor-label">{label}<span className="float-right font-mono">{format ? format(value) : value}</span>
-    <input type="range" aria-label={label} min={min} max={max} step={step} value={value}
-      onPointerDown={() => { first.current = true }} onKeyDown={() => { first.current = true }}
-      onChange={(e) => { onChange(Number(e.target.value), first.current); first.current = false }} />
-  </label>
-}
-const Group = ({ title, children }: { title: string; children: ReactNode }): React.JSX.Element => <section className="editor-style-group"><h4>{title}</h4>{children}</section>
 
 /**
  * Text tab: text overlays and hooks on top of the video, each with its own

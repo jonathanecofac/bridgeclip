@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Plus, Trash2, Wand2, ZoomIn } from 'lucide-react'
 import type { CandidateEdit } from '../../shared/clip-editor'
 import { MAX_LOOKS, NO_EFFECTS, type Effects, type Look } from '../../shared/effects'
@@ -6,20 +6,9 @@ import { EDIT_PRESETS, applyEditPreset } from '../lib/edit-presets'
 import { punchInScenes } from '../lib/punch-in'
 import { cn } from '../lib/utils'
 import { Button } from './ui/Button'
+import { Group, Range } from './EditorControls'
 import { Switch } from './ui/Switch'
 
-function Range({ label, value, min, max, step = 1, format, onChange }: {
-  label: string; value: number; min: number; max: number; step?: number; format?: (v: number) => string
-  onChange: (value: number, remember: boolean) => void
-}): React.JSX.Element {
-  const first = useRef(true)
-  return <label className="editor-label">{label}<span className="float-right font-mono">{format ? format(value) : value}</span>
-    <input type="range" aria-label={label} min={min} max={max} step={step} value={value}
-      onPointerDown={() => { first.current = true }} onKeyDown={() => { first.current = true }}
-      onChange={(e) => { onChange(Number(e.target.value), first.current); first.current = false }} />
-  </label>
-}
-const Group = ({ title, children }: { title: string; children: ReactNode }): React.JSX.Element => <section className="editor-style-group"><h4>{title}</h4>{children}</section>
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
 
 /**

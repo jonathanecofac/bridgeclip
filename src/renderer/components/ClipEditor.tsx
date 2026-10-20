@@ -1,8 +1,8 @@
 import { SavedStageTimings } from './StageBreakdown'
 import { registerNavigationCommit } from '../lib/navigation'
 import { nextCaptionRange } from '../lib/caption-ranges'
-import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Archive, Check, ChevronLeft, ChevronRight, ChevronDown, Download, Eye, Film, Loader2, Pause, Pencil, Play, Plus, Redo2, RotateCcw, Scissors, SkipBack, Trash2, Undo2, X } from 'lucide-react'
+import { cloneElement, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Archive, Check, ChevronLeft, ChevronRight, ChevronDown, Download, Eye, Film, Loader2, Music, Pause, Pencil, Play, Plus, Redo2, RotateCcw, Scissors, SkipBack, Trash2, Undo2, X } from 'lucide-react'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatTimecode, localFileUrl, parseTimecode } from '../lib/utils'
 import { effectiveCaptionStyle, minimalOverrides } from '../../shared/caption-style'
@@ -15,7 +15,9 @@ import { ConfirmDialog } from './ui/ConfirmDialog'
 import { CaptionStylePanel } from './CaptionStylePanel'
 import { TextOverlayPanel } from './TextOverlayPanel'
 import { EffectsPanel } from './EffectsPanel'
-import { fadeAt, lookAt } from '../../shared/effects'
+import { editedTime, fadeAt, lookAt } from '../../shared/effects'
+import { AudioPanel } from './AudioPanel'
+import { DEFAULT_AUDIO, dbToGain, musicGainAt, musicPosition, newMusic, speechIntervals } from '../../shared/audio'
 import { TextOverlayPreview } from './TextOverlayPreview'
 import type { TextOverlay } from '../../shared/text-overlays'
 import { captionLines, type CaptionLine } from '../lib/caption-words'
@@ -70,12 +72,17 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
   const closeReplacement = useCallback(() => setReplacement(null), [])
   const [selected, setSelected] = useState(0)
   // From a clip's "Edit clip", start on captions and title; Jev review needs an OpenRouter key.
-  const [tab, setTab] = useState<'review' | 'framing' | 'captions' | 'text' | 'effects' | 'transcript'>(initialCandidateId ? 'captions' : 'review')
+  const [tab, setTab] = useState<'review' | 'framing' | 'captions' | 'text' | 'effects' | 'audio' | 'transcript'>(initialCandidateId ? 'captions' : 'review')
   const [selectedOverlay, setSelectedOverlay] = useState<number | null>(null)
   const [time, setTime] = useState(0)
   const timeRef = useRef(time); timeRef.current = time
   const [playing, setPlaying] = useState(false)
   const [reviewSpeed, setReviewSpeed] = useState(1)
+  const reviewSpeedRef = useRef(reviewSpeed); reviewSpeedRef.current = reviewSpeed
+  /** Background music for the live preview, and its length once loaded. */
+  const musicPlayer = useRef<HTMLAudioElement>(null)
+  const [musicMs, setMusicMs] = useState<number | null>(null)
+  const musicMsRef = useRef(musicMs); musicMsRef.current = musicMs
   const [previewCut, setPreviewCut] = useState(true)
   const [showSubtitlePreview, setShowSubtitlePreview] = useState(true)
   const [cameraThreshold, setCameraThreshold] = useState(.08)
@@ -107,6 +114,10 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
   const activeTranscript = session?.project.transcript.find((r) => time >= r.start_ms && time < r.end_ms)
   const candidate = edits[selected]
   const candidateRef = useRef(candidate); candidateRef.current = candidate
+  // Speech on the final clock, for ducking the music in the preview exactly where the export does.
+  const speech = useMemo(() => session && candidate?.audio?.music?.duck ? speechIntervals(session.project.transcript, candidate) : [],
+    [session, candidate?.audio?.music?.duck, candidate?.ranges, candidate?.video_speed])
+  const speechRef = useRef(speech); speechRef.current = speech
   const frames = candidate?.camera_scan?.frames ?? []
   const currentScene = candidate ? sceneAt(candidate, time) : null
   const key = JSON.stringify(edits.map(candidateEdit))
@@ -359,6 +370,28 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
         }
         const fade = c.effects ? fadeAt(c, c.effects, t) : null
         if (fade && fade.opacity > 0) { ctx.globalAlpha = Math.min(1, fade.opacity); ctx.fillStyle = fade.color; ctx.fillRect(0, 0, out.width, out.height); ctx.globalAlpha = 1 }
+        // Sound as exported, within what an HTML player can do (no boost above 100%, no loudness normalization).
+        const edited = editedTime(c.ranges, t)
+        const total = c.ranges.reduce((n, [a, b]) => n + b - a, 0) / c.video_speed, now = edited === null ? null : edited / c.video_speed
+        const audio = c.audio ?? DEFAULT_AUDIO, fx = c.effects
+        let voice = audio.mute ? 0 : dbToGain(audio.volume_db)
+        if (fx && now !== null) {
+          const fadeIn = Math.min(fx.fade_in_ms, total / 2), fadeOut = Math.min(fx.fade_out_ms, total / 2)
+          if (fadeIn > 0 && now < fadeIn) voice *= now / fadeIn
+          if (fadeOut > 0 && now > total - fadeOut) voice *= (total - now) / fadeOut
+        }
+        voice = Math.max(0, Math.min(1, voice))
+        if (Math.abs(v.volume - voice) > .004) v.volume = voice
+        const player = musicPlayer.current, music = audio.music, length = musicMsRef.current
+        if (player) {
+          if (music && length && now !== null && !v.paused && player.readyState >= 2) {
+            const target = musicPosition(music, length, now)
+            if (player.playbackRate !== reviewSpeedRef.current) player.playbackRate = reviewSpeedRef.current
+            if (player.paused) { player.currentTime = target; void player.play().catch(() => {}) }
+            else if (Math.abs(player.currentTime - target) > .25) player.currentTime = target
+            player.volume = Math.max(0, Math.min(1, musicGainAt(music, speechRef.current, now, total)))
+          } else if (!player.paused) player.pause()
+        }
       }
       frame = requestAnimationFrame(draw)
     }
@@ -424,6 +457,18 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
       const frame = await getApi().editor.previewFrame(outputDir, sessionRef.current!.project.revision, candidate.id, at)
       setExactFrame({ path: frame.path, time: at, key: keyRef.current })
     } catch (e) { setError(errorMessage(e)) } finally { setBusy(null) }
+  }
+  const importMusic = async (): Promise<void> => {
+    if (!candidate || busy) return
+    video.current?.pause(); setError(null); setNotice(null); setBusy('import-music')
+    let imported: { file: string; name: string } | null = null
+    try { imported = await getApi().editor.importMusic(outputDir) } catch (e) { setError(errorMessage(e)) } finally { setBusy(null) }
+    if (!imported) return
+    const audio = candidate.audio ?? DEFAULT_AUDIO
+    // Replacing keeps the volume, ducking and fades; the new track starts at its beginning.
+    const music = audio.music ? { ...audio.music, file: imported.file, name: imported.name, offset_ms: 0 } : newMusic(imported.file, imported.name)
+    setMusicMs(null)
+    change({ audio: { ...audio, music } })
   }
   const chooseReplacement = async (): Promise<void> => {
     video.current?.pause(); setEditingCaption(null)
@@ -686,6 +731,10 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
         <div className="editor-monitors">
           <div className="editor-source-monitor"><div className="editor-pane-heading">Source <span>{project.width} × {project.height}</span><Button size="sm" variant="ghost" disabled={!!busy || saving} onClick={() => { void chooseReplacement() }}>Replace source video</Button></div>
             <div className="editor-source-frame" style={{ aspectRatio: project.width / project.height }}>
+              {candidate.audio?.music && <audio key={candidate.audio.music.file} ref={musicPlayer} preload="auto" loop
+                src={localFileUrl(session.previewPath.replace(/[^\\/]+$/, candidate.audio.music.file))}
+                onLoadedMetadata={(e) => setMusicMs(Number.isFinite(e.currentTarget.duration) ? Math.round(e.currentTarget.duration * 1000) : null)}
+                onError={() => { setMusicMs(null); setError('The background music file is missing. Choose the music again in Audio.') }} />}
               <video ref={video} src={localFileUrl(session.previewPath)} preload="auto" playsInline
                 onLoadedMetadata={() => { seek(start); if (video.current) video.current.playbackRate = candidate.video_speed * reviewSpeed }}
                 onPlay={() => setPlaying(true)} onPause={() => {
@@ -790,6 +839,14 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
               title={`${o.text} · ${clock(o.start_ms)} – ${clock(o.end_ms)} · Drag to move, click to edit`} aria-label={`Text ${clock(o.start_ms)}: ${o.text}`}
               disabled={editingDisabled} onPointerDown={(e) => startOverlayDrag(e, i)}>{o.text.split('\n')[0]}</button>)}
           </div>}
+          {candidate.audio?.music && <div className="editor-overlay-blocks" aria-label="Music track">
+            {(() => {
+              const a = Math.max(candidate.ranges[0][0], viewStart), b = Math.min(candidate.ranges.at(-1)![1], viewEnd)
+              return b > a && <button className="editor-overlay-block editor-music-block" title={`Background music: ${candidate.audio.music.name}. Click to edit in Audio.`}
+                style={{ left: `${(a - viewStart) / (viewEnd - viewStart) * 100}%`, width: `${(b - a) / (viewEnd - viewStart) * 100}%` }}
+                onClick={() => setTab('audio')}><Music size={9} className="inline mr-1" />{candidate.audio.music.name}</button>
+            })()}
+          </div>}
           {candidate.captions && <div className={cn('editor-caption-blocks', editingDisabled && 'opacity-60')} aria-label="Caption track">
             {captionLines(project, candidate).filter((line) => line.end > viewStart && line.start < viewEnd).slice(0, 400).map((line) => {
               const left = (Math.max(line.start, viewStart) - viewStart) / (viewEnd - viewStart), width = (Math.min(line.end, viewEnd) - Math.max(line.start, viewStart)) / (viewEnd - viewStart)
@@ -813,7 +870,7 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
           </div>
         </div>
       </div>
-      <aside className="editor-inspector"><div className="editor-tabs">{(['review', 'framing', 'captions', 'text', 'effects', 'transcript'] as const).map((t) => <button key={t} aria-pressed={tab === t} onClick={() => setTab(t)} className={cn(tab === t && 'selected')}>{t === 'review' ? 'Jev' : t[0].toUpperCase() + t.slice(1)}</button>)}</div>
+      <aside className="editor-inspector"><div className="editor-tabs">{(['review', 'framing', 'captions', 'text', 'effects', 'audio', 'transcript'] as const).map((t) => <button key={t} aria-pressed={tab === t} onClick={() => setTab(t)} className={cn(tab === t && 'selected')}>{t === 'review' ? 'Jev' : t[0].toUpperCase() + t.slice(1)}</button>)}</div>
         <div ref={transcriptPanel} className="editor-inspector-body"><label className="editor-label" htmlFor="editor-title">Title</label><textarea id="editor-title" value={candidate.title} maxLength={200} disabled={editingDisabled} rows={2} onChange={(e) => { if (e.target.value.trim()) change({ title: e.target.value }) }} />
           {tab === 'review' && <div className="space-y-3 mt-4"><div className="flex items-center justify-between"><span className={cn('text-xs', current ? candidate.review?.decision === 'passes' ? 'text-success' : 'text-warning' : 'text-ink-muted')}>{!current ? 'Review out of date' : candidate.review?.decision === 'passes' ? 'Checks passed' : 'Consider before baking'}</span><Button size="sm" disabled={editingDisabled} onClick={() => { void run('review') }}>Review again</Button></div><p className="text-2xs text-ink-subtle">{current ? 'Review the questions, then adjust the cut and framing. You decide when the clip is ready.' : 'These results describe an earlier edit. Run Jev again to check your changes.'}</p>{candidate.review?.questions.map((q) => <Question key={q.id} q={q} />)}{!candidate.review && <p>No review is available yet. Run Jev to evaluate this candidate.</p>}{candidate.review?.cuts.map((cut, i) => <div key={i}><p className="editor-label">Removed {clock(cut.interval[0])} – {clock(cut.interval[1])}</p>{cut.questions.map((q) => <Question key={q.id} q={q} />)}</div>)}</div>}
           {tab === 'framing' && <fieldset disabled={editingDisabled} className="space-y-4 mt-4"><div className="editor-layouts">{(['fill', 'split', 'fit'] as const).map((l) => <button key={l} className={cn(currentScene.layout === l && 'selected')} onClick={() => setLayout(l)}>{l === 'fill' ? 'Full frame' : l === 'split' ? 'Split' : 'Fit'}</button>)}</div>{currentScene.layout === 'split' && <div className="flex gap-2">{['Top', 'Bottom'].map((name, i) => <Button key={i} size="sm" variant={panel === i ? 'primary' : 'secondary'} onClick={() => setPanel(i)}>{name}</Button>)}</div>}{currentScene.layout !== 'fit' && <><label className="editor-label">Zoom<input aria-label="Crop zoom" type="range" min={1} max={4} step={.02} value={Math.min(4, defaultCrop(project.width, project.height, aspect * currentScene.crops.length)[2] / crop[2])} onChange={(e) => cropChange(defaultCrop(project.width, project.height, aspect * currentScene.crops.length, crop[0] + crop[2] / 2, crop[1] + crop[3] / 2, Number(e.target.value)))} /></label>{([0, 1] as const).map((axis) => <label key={axis} className="editor-label">{axis === 0 ? 'Horizontal' : 'Vertical'}<input type="range" aria-label={axis === 0 ? 'Horizontal crop position' : 'Vertical crop position'} min={0} max={Math.max(0, 1 - crop[axis + 2])} step={.001} value={crop[axis]} onChange={(e) => { const c = [...crop] as Crop; c[axis] = Number(e.target.value); cropChange(c) }} /></label>)}</>}{sceneIndex > 0 && <div className="editor-motion"><label className="flex items-center justify-between gap-2 text-xs"><span>Smooth movement</span><input type="checkbox" aria-label="Smooth movement" checked={!!currentScene.transition_ms} disabled={!canAnimate || editingDisabled} onChange={(e) => sceneChange({ transition_ms: e.target.checked ? 600 : undefined })} /></label>{canAnimate && currentScene.transition_ms ? <label className="editor-label mt-3">Duration <span className="float-right">{(currentScene.transition_ms / 1000).toFixed(1)}s</span><input aria-label="Movement duration" type="range" min={100} max={5000} step={100} value={currentScene.transition_ms} onChange={(e) => sceneChange({ transition_ms: Number(e.target.value) })} /></label> : !canAnimate ? <p className="text-2xs text-ink-subtle mt-2">Use the same layout as the previous section to animate its crops.</p> : null}{!!currentScene.transition_ms && <Button size="sm" variant="ghost" onClick={() => { seek(Math.max(start, currentScene.at_ms)); void video.current?.play() }}>Preview movement</Button>}</div>}<div className="space-y-2 border-t border-white/10 pt-3"><div className="editor-layout-time">
@@ -827,6 +884,8 @@ export function ClipEditor({ outputDir, leading, onExports, initialCandidateId }
           {tab === 'effects' && <EffectsPanel candidate={candidate} time={time} disabled={editingDisabled} seek={seek}
             onChange={(patch, remember) => { video.current?.pause(); change(patch, remember) }}
             timeInput={(label, value, onChange) => <TimeInput label={label} value={value} disabled={editingDisabled} onChange={onChange} />} />}
+          {tab === 'audio' && <AudioPanel candidate={candidate} musicMs={candidate.audio?.music ? musicMs : null} disabled={editingDisabled}
+            importing={busy === 'import-music'} onImport={() => { void importMusic() }} onChange={(patch, remember) => change(patch, remember)} />}
           {tab === 'text' && <TextOverlayPanel overlays={overlays} selected={selectedOverlay !== null && selectedOverlay < overlays.length ? selectedOverlay : null} time={time}
             clipStart={start} duration={project.duration_ms} title={candidate.title} disabled={editingDisabled} onSelect={setSelectedOverlay} seek={seek}
             onChange={(next, remember) => { video.current?.pause(); setOverlays(next, remember) }}

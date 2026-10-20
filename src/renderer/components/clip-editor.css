@@ -194,3 +194,4 @@
 .editor-tabs { overflow-x:auto; scrollbar-width:none; }
 .editor-tabs::-webkit-scrollbar { display:none; }
 .editor-tabs button { flex:1 0 auto; padding-left:7px; padding-right:7px; }
+.editor-music-block { background:#7dd3c0cc; cursor:pointer; }

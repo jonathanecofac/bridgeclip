@@ -1,6 +1,7 @@
 import { parseCaptionStyle, type CaptionStyleOverrides } from './caption-style'
 import { parseTextOverlays, type TextOverlay } from './text-overlays'
 import { hasEffects, parseEffects, type Effects } from './effects'
+import { hasAudio, parseAudio, type AudioSettings } from './audio'
 
 /** Persisted source-time edits. Media paths and review results are main-process owned. */
 export type Crop = [number, number, number, number]
@@ -45,6 +46,8 @@ export interface CandidateEdit {
   text_overlays?: TextOverlay[]
   /** Fades, cut transitions and color looks. */
   effects?: Effects
+  /** Voice level, mute, loudness normalization and background music. */
+  audio?: AudioSettings
 }
 export interface CaptionEdit { segment: number; text: string; start_ms?: number; end_ms?: number }
 export interface CaptionInsert { start_ms: number; end_ms: number; text: string }
@@ -69,7 +72,7 @@ export interface EditorProject {
   transcript: { start_ms: number; end_ms: number; text: string; words?: [number, number][] }[]
 }
 export interface EditorProgress { phase: 'scan' | 'preview' | 'source'; percent: number }
-export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | 'create-project' | 'preview-frame'
+export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | 'create-project' | 'preview-frame' | 'import-music'
 export interface EditorBatch { completed: number; total: number; failed?: number }
 export interface EditorSession {
   progress?: EditorProgress; project: EditorProject; sourcePath: string; previewPath: string
@@ -96,7 +99,7 @@ export const EDITOR_REVISION_CONFLICT = 'This project changed. Reopen it before 
 /** Fixed worker failure codes (see bridge/editor_runner.py); no tool output crosses the bridge. */
 export const editorErrorCodes = ['duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
   'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable',
-  'cancelled', 'timeout'] as const
+  'music_invalid', 'cancelled', 'timeout'] as const
 export type EditorErrorCode = typeof editorErrorCodes[number]
 export function isEditorErrorCode(value: unknown): value is EditorErrorCode {
   return typeof value === 'string' && (editorErrorCodes as readonly string[]).includes(value)
@@ -123,6 +126,13 @@ export function editorFailureMessage(action: Exclude<EditorOperation, 'save'>, c
       : code === 'cancelled' ? 'Exact preview cancelled.'
       : code && common[code] ? common[code]!
       : `Could not render the exact preview. Your edits are saved. ${logs}`
+  }
+  if (action === 'import-music') {
+    return code === 'music_invalid' ? "This audio file can't be used. Choose an MP3, WAV, M4A, AAC, OGG or FLAC file with sound."
+      : code === 'cancelled' ? 'Music import cancelled.'
+      : code === 'timeout' ? 'Importing the music took too long and was stopped.'
+      : code === 'engine_unavailable' ? common.engine_unavailable!
+      : `Could not import this music. ${logs}`
   }
   if (action === 'create-project') {
     return code === 'duration' ? `${EDITOR_SOURCE_UNAVAILABLE} The selected video has a different duration than the one these clips came from. Choose the original video.`
@@ -157,6 +167,7 @@ export function editorFailureMessage(action: Exclude<EditorOperation, 'save'>, c
   return code === 'render_failed' ? `Rendering failed. Your edits are saved. Try again, or simplify this clip's layouts. ${logs}`
     : code === 'invalid_edit' ? "This clip has an edit that can't be rendered. Check its cuts, layouts and captions, then try again."
     : code === 'not_ready' ? 'Mark this clip ready before baking it.'
+    : code === 'music_invalid' ? "This clip's background music is missing or unreadable. Choose the music again in Audio, then export."
     : code === 'timeout' ? 'Rendering took too long and was stopped. Your edits are saved.'
     : code === 'cancelled' ? 'Export cancelled.'
     : code && common[code] ? common[code]!
@@ -231,6 +242,8 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
   }).sort((a, b) => a.start_ms - b.start_ms)
   let effects: Effects | undefined
   if (v.effects !== undefined) { try { effects = parseEffects(v.effects, duration) } catch { fail() } }
+  let audio: AudioSettings | undefined
+  if (v.audio !== undefined) { try { audio = parseAudio(v.audio) } catch { fail() } }
   let text_overlays: TextOverlay[] | undefined
   if (v.text_overlays !== undefined) { try { text_overlays = parseTextOverlays(v.text_overlays, duration) } catch { fail() } }
   let caption_style: CaptionStyleOverrides | undefined
@@ -245,7 +258,7 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
     caption_y: v.caption_y == null ? null : num(v.caption_y, .1, .9),
     ...(v.title_card === undefined ? {} : { title_card: typeof v.title_card === 'boolean' ? v.title_card : fail() }),
     ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}),
-    ...(text_overlays?.length ? { text_overlays } : {}), ...(hasEffects(effects) ? { effects } : {}),
+    ...(text_overlays?.length ? { text_overlays } : {}), ...(hasEffects(effects) ? { effects } : {}), ...(hasAudio(audio) ? { audio } : {}),
     ...(v.dismissed_camera_markers === undefined ? {} : { dismissed_camera_markers: [...new Set(arr(v.dismissed_camera_markers, 5000).map((t) => num(t, 0, duration)))].sort((a, b) => a - b) }) }
 }
 function question(value: unknown): EditorQuestion {
@@ -302,10 +315,10 @@ export function parseEditorProject(value: unknown): EditorProject {
     transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }
 export function candidateEdit(c: CandidateEdit): CandidateEdit {
-  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card, caption_style, caption_inserts, text_overlays, effects } = c
+  const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers, title_card, caption_style, caption_inserts, text_overlays, effects, audio } = c
   return { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges, caption_y: c.caption_y ?? null, ...(dismissed_camera_markers ? { dismissed_camera_markers } : {}), ...(title_card !== undefined ? { title_card } : {}),
     ...(caption_style && Object.keys(caption_style).length ? { caption_style } : {}), ...(caption_inserts?.length ? { caption_inserts } : {}),
-    ...(text_overlays?.length ? { text_overlays } : {}), ...(hasEffects(effects) ? { effects } : {}) }
+    ...(text_overlays?.length ? { text_overlays } : {}), ...(hasEffects(effects) ? { effects } : {}), ...(hasAudio(audio) ? { audio } : {}) }
 }
 export function renderEditKey(c: CandidateEdit): string {
   return JSON.stringify({ ...candidateEdit(c), status: undefined, dismissed_camera_markers: undefined })

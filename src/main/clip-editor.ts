@@ -13,7 +13,7 @@ import { getBridgeRunnerPath, getEnginePath, resolvePythonPath, runtimeEnvironme
 import { resolveBinary } from './tools'
 import { logger } from './logger'
 
-type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source' | 'create-project' | 'preview-frame'
+type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source' | 'create-project' | 'preview-frame' | 'import-music'
 interface EditorOperation { progress?: EditorSession['progress']; action: NonNullable<EditorSession['operation']>; child?: ChildProcess; cancelled?: boolean; abort?: AbortController; batch?: EditorBatch }
 const operations = new Map<string, EditorOperation>()
 export function editorBusy(path: string): boolean { return operations.has(realpathSync(path)) }
@@ -54,6 +54,8 @@ function mediaNames(project: EditorProject): { source: string; preview: string }
 const EDITOR_MEDIA = /^editor-(?:source|preview)(?:-[a-f0-9]{32})?\.mp4(?:\.partial\.mp4)?$/
 /** Exact-preview stills; only the latest is shown and none are needed once the editor reloads. */
 const EDITOR_FRAME = /^editor-frame-[a-f0-9]{32}\.png$/
+/** Imported background music. Kept while the project is editable (unsaved edits can refer to it); removed with editor media. */
+const EDITOR_MUSIC = /^editor-music-[a-f0-9]{32}\.mp4$/
 /**
  * Remove leftovers of killed or cancelled operations: `.editor-*` temp files and
  * folders, and editor media the project does not reference. Runs only while no
@@ -61,9 +63,10 @@ const EDITOR_FRAME = /^editor-frame-[a-f0-9]{32}\.png$/
  */
 function sweepEditorFiles(run: string, project?: EditorProject): void {
   if (operations.has(run)) return
-  let keep: Set<string> | null = null
+  let keep: Set<string> | null = null, freed = false
   try {
     project ??= readProject(run)
+    freed = project.media_freed === true
     keep = new Set(project.media_freed ? [] : Object.values(mediaNames(project)))
   } catch { /* Unreadable state: keep all media, still remove temporary entries. */ }
   let entries: Dirent[]
@@ -71,7 +74,7 @@ function sweepEditorFiles(run: string, project?: EditorProject): void {
   let removed = 0
   for (const entry of entries) {
     const temporary = entry.name.startsWith('.editor-')
-    const frame = EDITOR_FRAME.test(entry.name) && (entry.isFile() || entry.isSymbolicLink())
+    const frame = (EDITOR_FRAME.test(entry.name) || (freed && EDITOR_MUSIC.test(entry.name))) && (entry.isFile() || entry.isSymbolicLink())
     if (!temporary && !frame && !(keep && EDITOR_MEDIA.test(entry.name) && !keep.has(entry.name) && (entry.isFile() || entry.isSymbolicLink()))) continue
     try { rmSync(join(run, entry.name), { recursive: temporary && entry.isDirectory(), force: true }); removed++ } catch { /* A playing preview can stay open on Windows; retry next time. */ }
   }
@@ -145,7 +148,7 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
       if (!edit) throw new Error('Candidate is missing')
       const next = { ...c, ...edit }
       // Optional edit fields that were cleared (no overrides, no added captions, title card off).
-      for (const key of ['caption_style', 'caption_inserts', 'title_card', 'text_overlays', 'effects'] as const) if (!(key in edit)) delete next[key]
+      for (const key of ['caption_style', 'caption_inserts', 'title_card', 'text_overlays', 'effects', 'audio'] as const) if (!(key in edit)) delete next[key]
       if (edit.status === 'baked') {
         // Unchanged since its render, or restored to the exact render "Refine again" left.
         const unchanged = c.status === 'baked' ? renderEditKey(edit) === renderEditKey(c) : !!c.baked_hash && c.exports.length > 0 && bakedHash(edit) === c.baked_hash
@@ -504,6 +507,36 @@ export async function previewEditorFrame(path: unknown, revision: unknown, candi
     const file = join(run, `editor-frame-${frameId}.png`)
     if (lstatSync(file).isSymbolicLink() || !isWithinDirectory(file, run)) throw new Error(editorFailureMessage('preview-frame'))
     return { path: file }
+  } finally {
+    operation.child = undefined
+    operations.delete(run)
+  }
+}
+
+/**
+ * Import background music the user chose: the engine keeps its first audio
+ * stream as AAC in the editor folder (editor-music-<id>.mp4). The project is
+ * unchanged until the editor saves an edit that uses it.
+ */
+export async function importEditorMusic(path: unknown, chosen: unknown): Promise<{ file: string; name: string; path: string }> {
+  const run = runPath(path)
+  assertAbsolutePath(chosen)
+  if (operations.has(run) || operations.size >= 2) throw new Error('An editor operation is already running. Try again when it finishes.')
+  const operation: EditorOperation = { action: 'import-music' }
+  operations.set(run, operation)
+  const id = randomUUID().replaceAll('-', '')
+  try {
+    const session = await openEditor(run)
+    if (session.project.media_freed) throw new Error('Editor media was freed. This project is read-only.')
+    const settings = loadSettings()
+    const { env, python } = workerSetup(settings)
+    await runWorker(run, operation, 'import-music', env, python, 25 * 60 * 1000,
+      { run, library: realpathSync(settings.outputDirectory), action: 'import-music', input: chosen, music_id: id })
+    const file = `editor-music-${id}.mp4`, full = join(run, file)
+    if (lstatSync(full).isSymbolicLink() || !isWithinDirectory(full, run)) throw new Error(editorFailureMessage('import-music'))
+    const name = [...win32.basename(chosen as string)].filter((c) => c.charCodeAt(0) >= 32).join('').slice(0, 200) || 'Music'
+    logger.info('editor.music.imported')
+    return { file, name, path: full }
   } finally {
     operation.child = undefined
     operations.delete(run)

@@ -109,6 +109,12 @@ class RenderRequest:
     effects: Optional[dict] = None
     effects_fade_in: bool = True
     effects_fade_out: bool = True
+    # Editor audio (audio_mix.validate_audio), with the imported music file,
+    # its length and the speech intervals (final clock) used for ducking.
+    audio: Optional[dict] = None
+    music_path: Optional[str] = None
+    music_ms: int = 0
+    speech_ms: Optional[list] = None
 
     title_text: Optional[str] = None
     # Off keeps title_text for editorial review but draws no title card.
@@ -559,13 +565,21 @@ class RenderingService:
         """Build the graph, captions and overlays for one edit and run FFmpeg."""
         has_audio = request.include_audio and await self._has_audio(request.video_path)
         from clip_engine.services.effects import audio_fade_filters, look_filters, picture_filters
-        effects = request.effects
+        from clip_engine.services import audio_mix
+        effects, audio = request.effects, request.audio
+        music = audio["music"] if audio and request.include_audio and request.music_path else None
+        voice = ",".join(f for f in (
+            audio_mix.voice_filters(audio) if audio else "",
+            audio_fade_filters(effects, request.video_speed, time_map.output_ms,
+                               request.effects_fade_in, request.effects_fade_out) if effects else "",
+        ) if f)
+        if audio and not audio["normalize"]:
+            loudness_filter = audio_mix.loudness_override(audio)
         graph = build_layout_graph(
             plan, target_width, target_height, time_map.keeps, has_audio, landscape=is_landscape,
             fps=fps, loudness_filter=loudness_filter,
             video_speed=request.video_speed,
-            audio_filters=audio_fade_filters(effects, request.video_speed, time_map.output_ms,
-                                             request.effects_fade_in, request.effects_fade_out) if effects else "",
+            audio_filters=voice,
         )
         looks = look_filters(effects["looks"], window_start_ms, time_map) if effects else ""
         if looks:
@@ -596,6 +610,19 @@ class RenderingService:
         filter_complex, extra_inputs = self._compose_overlays(
             graph, overlays, f"{speed},{picture}" if picture else speed,
         )
+        output_ms = scaled_duration_ms(time_map.output_ms, request.video_speed)
+        audio_inputs = []
+        if music:
+            # Music joins after the speed change, on the final clock; it is the last input.
+            if has_audio:
+                if filter_complex.count("[aout]") != 1:
+                    raise RenderingError("Unexpected audio graph")
+                filter_complex = filter_complex.replace("[aout]", "[voice]")
+            else:
+                filter_complex += f";anullsrc=r=48000:cl=stereo:d={output_ms / 1000:.6f}[voice]"
+            filter_complex += ";" + audio_mix.mix_graph("voice", 1 + len(extra_inputs), music, request.music_ms,
+                                                        output_ms, request.speech_ms or [])
+            audio_inputs = [request.music_path]
 
         try:
             await self._run_ffmpeg_complex(
@@ -604,11 +631,12 @@ class RenderingService:
                 start_time_ms=window_start_ms,
                 duration_ms=window_ms,
                 filter_complex=filter_complex,
-                audio_label="[aout]" if has_audio else None,
+                audio_label="[aout]" if has_audio or music else None,
                 extra_inputs=extra_inputs if extra_inputs else None,
+                audio_inputs=audio_inputs or None,
                 fps=fps,
                 output_size=(target_width, target_height),
-                output_duration_ms=scaled_duration_ms(time_map.output_ms, request.video_speed),
+                output_duration_ms=output_ms,
                 **({'progress': lambda percent: request.progress_callback('Rendering video', percent)} if request.progress_callback else {}),
             )
         finally:
@@ -1116,6 +1144,7 @@ class RenderingService:
         extra_inputs: Optional[list[str]] = None,
         fps: str = "30",
         output_size: tuple[int, int] = (1080, 1920),
+        audio_inputs: Optional[list[str]] = None,
         output_duration_ms: Optional[int] = None,
         progress=None,
     ) -> None:
@@ -1141,6 +1170,9 @@ class RenderingService:
 
         for extra in (extra_inputs or []):
             cmd.extend(["-loop", "1", "-protocol_whitelist", "file,pipe,fd", "-i", extra])
+        for extra in (audio_inputs or []):
+            # Editor music (imported as AAC in MP4), looped; the graph trims it to the clip.
+            cmd.extend(["-stream_loop", "-1", "-protocol_whitelist", "file,pipe,fd", "-format_whitelist", "mov", "-i", extra])
 
         cmd.extend([
             "-filter_complex", filter_complex,

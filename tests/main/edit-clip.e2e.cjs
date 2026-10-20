@@ -384,3 +384,97 @@ test('effects: edit styles with undo, punch-in zoom, a look, fades, slow motion,
   assert.ok(Math.abs(Number(info.format.duration) - kept / .5) < .2, `slow motion doubles ${kept}s to ${info.format.duration}s`)
   assert.deepEqual(errors, [])
 })
+
+test('audio: import music, mute, volume, ducking and fades, preview playback, and a mixed export', { timeout: 420000 }, async (t) => {
+  const tools = editorTools(t, { python: true, captions: true })
+  if (!tools) return
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-edit-audio-'))
+  const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, 'Library')
+  const original = path.join(root, 'source.mp4')
+  video(tools, original, 12)
+  const music = path.join(root, 'Musique d’été [mix] 1.wav')
+  execFileSync(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=3', music])
+  const run = automaticRun(tools, library, 'audio-run', original)
+  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: tools.python, openrouterApiKey: '', zernioApiKey: '' }))
+  const appDir = buildApp(path.join(root, 'app'))
+  linkEngine(appDir)
+  const session = await launchApp({ appDir, userDataDir, env: tools.appEnv })
+  t.after(async () => {
+    const stop = setTimeout(() => session.app.process().kill('SIGTERM'), 5000)
+    try { await session.close() } finally { clearTimeout(stop); fs.rmSync(root, { recursive: true, force: true }) }
+  })
+  const { app, page } = session
+  const shots = process.env.BRIDGECLIP_E2E_SHOTS
+  const errors = []; page.on('pageerror', (e) => errors.push(e.message))
+  page.setDefaultTimeout(20000)
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1500, 1000))
+  const saved = async () => {
+    await page.getByText('All changes saved', { exact: true }).waitFor()
+    return JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'), 'utf8')).candidates[0]
+  }
+  const nudge = async (name, presses, key = 'ArrowRight') => {
+    const slider = page.getByRole('slider', { name, exact: true })
+    await slider.focus(); for (let i = 0; i < presses; i++) await slider.press(key)
+  }
+  await page.getByRole('button', { name: /^Library/ }).click()
+  await page.getByRole('button', { name: 'Open Interview audio-run', exact: true }).click()
+  await page.locator('article').filter({ has: page.getByRole('heading', { name: 'Why it matters', exact: true }) }).getByRole('button', { name: 'Edit clip', exact: true }).click()
+  await page.getByRole('region', { name: 'Clip editor' }).waitFor({ timeout: 120000 })
+  await page.locator('.editor-tabs').getByRole('button', { name: 'Audio', exact: true }).click()
+
+  // Import: the chosen file is copied into the project as AAC; the original is untouched.
+  await app.evaluate(({ dialog }, file) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [file] }) }, music)
+  await page.getByRole('button', { name: 'Add music…', exact: true }).click()
+  await page.getByRole('button', { name: 'Remove music', exact: true }).waitFor({ timeout: 60000 })
+  let candidate = await saved()
+  assert.match(candidate.audio.music.file, /^editor-music-[a-f0-9]{32}\.mp4$/)
+  assert.equal(candidate.audio.music.name, 'Musique d’été [mix] 1.wav')
+  assert.ok(fs.statSync(path.join(run, candidate.audio.music.file)).size > 1000)
+  assert.equal(candidate.audio.music.duck, true)
+  await page.getByLabel('Music track').waitFor()
+  await page.getByText('0:03', { exact: true }).waitFor()
+
+  // Clip sound and music settings.
+  await nudge('Volume', 3)
+  await page.getByText(/The preview can't play louder than the original/).waitFor()
+  await nudge('Music volume', 6)
+  await nudge('Lower by', 3, 'ArrowLeft')
+  await nudge('Music fade out', 5)
+  candidate = await saved()
+  assert.equal(candidate.audio.volume_db, 3); assert.equal(candidate.audio.music.volume_db, -12)
+  assert.equal(candidate.audio.music.duck_db, -15); assert.equal(candidate.audio.music.fade_out_ms, 2000)
+  await page.getByRole('button', { name: 'Remove music', exact: true }).click()
+  await page.getByRole('button', { name: 'Add music…', exact: true }).waitFor()
+  candidate = await saved()
+  assert.equal(candidate.audio.music, null)
+  await page.getByRole('button', { name: 'Undo', exact: true }).click()
+  await page.getByRole('button', { name: 'Remove music', exact: true }).waitFor()
+  candidate = await saved()
+  assert.ok(candidate.audio.music, 'Undo brings the music back')
+
+  // The preview plays the music with the video, and pauses it with the video.
+  await page.locator('.editor-monitor-hint').click().catch(() => {})
+  await page.keyboard.press('Space')
+  await page.waitForFunction(() => { const a = document.querySelector('audio'); return a && !a.paused && a.currentTime > .2 }, null, { timeout: 15000 })
+  await page.keyboard.press('Space')
+  await page.waitForFunction(() => document.querySelector('audio')?.paused === true)
+  if (shots) await page.screenshot({ path: path.join(shots, 'edit-audio.png') })
+
+  // Mute the clip's own sound so the export carries only the music.
+  await page.getByRole('switch', { name: 'Mute clip sound' }).click()
+  candidate = await saved()
+  assert.equal(candidate.audio.mute, true)
+  await page.getByRole('button', { name: 'Export clip', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Exported “Why it matters” as a new clip/ }).waitFor({ timeout: 240000 })
+  const exported = JSON.parse(fs.readFileSync(path.join(run, 'job_output.json'), 'utf8')).clips.at(-1)
+  const info = probe(tools, exported.s3_url)
+  const streams = Object.fromEntries(info.streams.map((s) => [s.codec_type, Number(s.duration)]))
+  const kept = candidate.ranges.reduce((n, [a, b]) => n + b - a, 0) / 1000
+  assert.ok(Math.abs(streams.audio - kept) < .1 && Math.abs(streams.video - kept) < .1, JSON.stringify(streams))
+  const stats = require('node:child_process').spawnSync(tools.ffmpeg, ['-v', 'info', '-i', exported.s3_url, '-vn', '-af', 'atrim=start=0.2:end=1,astats=measure_overall=RMS_level:measure_perchannel=none', '-f', 'null', '-'], { encoding: 'utf8' })
+  const level = Number(/RMS level dB: (-?[\d.]+)/.exec(stats.stderr)?.[1])
+  // Muted voice, music at -12 dB lowered by 15 dB under speech: quiet but clearly not silence (about -91 dB).
+  assert.ok(level > -60, `music is in the export (${level} dB)`)
+  assert.ok(fs.existsSync(music), 'the chosen music file is left where it was')
+  assert.deepEqual(errors, [])
+})

@@ -23,7 +23,8 @@ from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, PROBE_TIMEOU
 
 # Fixed failure codes; the only failure detail that crosses the bridge.
 EDITOR_ERROR_CODES = frozenset({'duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
-    'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable'})
+    'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable',
+    'music_invalid'})
 
 
 class EditorError(ValueError):
@@ -609,6 +610,8 @@ def validate_candidate(c, duration, transcript_count=100000):
     validate_text_overlays(c.get('text_overlays'), duration)
     from clip_engine.services.effects import validate_effects
     validate_effects(c.get('effects'), duration)
+    from clip_engine.services.audio_mix import validate_audio
+    validate_audio(c.get('audio'))
 
 
 def _spread(tokens, start, end):
@@ -704,6 +707,9 @@ async def run_editor(config, progress=None):
         raise ValueError('Editor project is outside the library')
     if config['action'] == 'create-project':
         await create_project(run, progress)
+        return
+    if config['action'] == 'import-music':
+        await import_music(run, config.get('input'), config.get('music_id'))
         return
     project = read_json(run, 'editor-project.json')
     if project['version'] != 1 or project['revision'] != config['revision']:
@@ -806,6 +812,69 @@ def effects_for(c, project):
     return effects if describe(effects) else None
 
 
+def audio_for(run, project, c):
+    """RenderRequest fields for the clip's audio settings (none when they change nothing)."""
+    from clip_engine.services.audio_mix import describe, speech_intervals, validate_audio
+    audio = validate_audio(c.get('audio'))
+    if not describe(audio):
+        return {}
+    fields = {'audio': audio}
+    music = audio['music']
+    if music:
+        with failure_code('music_invalid'):
+            path = local_file(run, music['file'])
+            fields.update(music_path=str(path), music_ms=music_length(path))
+        words = []
+        for row in project['transcript']:
+            timed = row.get('words')
+            words.extend([tuple(w) for w in timed] if timed and len(timed) == len(row['text'].split()) else [(row['start_ms'], row['end_ms'])])
+        fields['speech_ms'] = speech_intervals(words, [tuple(r) for r in c['ranges']], c['video_speed'])
+    return fields
+
+
+def music_length(path, formats='mov'):
+    """Length of an audio file's first audio stream in ms; raises for anything unusable."""
+    result = run_media(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe,fd', '-format_whitelist', formats,
+                        '-show_streams', '-show_format', '-of', 'json', str(path)], timeout=PROBE_TIMEOUT_SECONDS, check=True)
+    data = json.loads(result.stdout)
+    stream = next(s for s in data['streams'] if s['codec_type'] == 'audio')
+    duration = float(stream.get('duration') or data['format'].get('duration') or 0) * 1000
+    if not math.isfinite(duration) or duration < 500:
+        raise ValueError('Audio is too short')
+    return round(duration)
+
+
+async def import_music(run, source, music_id):
+    """Copy a chosen audio file into the editor folder as editor-music-<id>.mp4 (AAC).
+
+    Only the first audio stream is kept (no cover art, metadata or chapters),
+    capped at 30 minutes. The project is not changed: the editor references
+    the file once the user saves.
+    """
+    from clip_engine.services.audio_mix import MAX_MUSIC_MS, MUSIC_INPUT_FORMATS
+    if not isinstance(music_id, str) or not re.fullmatch(r'[a-f0-9]{32}', music_id):
+        raise ValueError('Invalid music id')
+    with failure_code('music_invalid'):
+        if not isinstance(source, str) or not os.path.isabs(source):
+            raise ValueError('Invalid music path')
+        path = Path(source)
+        if not path.is_file() or path.stat().st_size > 1024 * 1024 * 1024:
+            raise ValueError('Unsupported music file')
+        await asyncio.to_thread(music_length, path, MUSIC_INPUT_FORMATS)
+    target = run / f'editor-music-{music_id}.mp4'
+    if target.exists() or target.is_symlink():
+        raise ValueError('Music file already exists')
+    with tempfile.TemporaryDirectory(prefix='.editor-music-', dir=run) as work, failure_code('music_invalid'):
+        partial = Path(work) / 'music.mp4'
+        await asyncio.to_thread(run_media, ['ffmpeg', '-nostdin', '-v', 'error', '-y', '-protocol_whitelist', 'file,pipe,fd',
+            '-format_whitelist', MUSIC_INPUT_FORMATS, '-i', str(path), '-map', '0:a:0', '-vn', '-sn', '-dn',
+            '-map_metadata', '-1', '-map_chapters', '-1', '-t', f'{MAX_MUSIC_MS / 1000:.0f}',
+            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', str(partial)],
+            timeout=20 * 60, check=True)
+        music_length(partial)
+        os.replace(partial, target)
+
+
 def text_overlays_for(c, project):
     from clip_engine.services.text_overlays import validate_text_overlays
     return validate_text_overlays(c.get('text_overlays'), project['duration_ms'])
@@ -837,7 +906,7 @@ async def export_clip(run, project, c, output, source, transcript):
             title_text=c['title'], include_title=c.get('title_card') is True,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
             caption_y=c.get('caption_y'), text_overlays=text_overlays_for(c, project), effects=effects_for(c, project),
-            apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
+            **audio_for(run, project, c), apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
             manual_ranges_ms=[tuple(interval) for interval in c['ranges']], manual_plan=manual_plan(project, c)))
         os.replace(result.output_path, path)
     output['clips'].append({'clip_index': index, 's3_url': str(path), 'duration_ms': result.duration_ms,
