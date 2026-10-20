@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
 ### Added
 
 - **Caption templates** in the editor: Viral Bold, Hormozi Style, Karaoke, Minimal Clean, Gaming and Cinematic (also in Create).
@@ -126,7 +128,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.2.0
 [0.1.19]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.19
 [0.1.18]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.18
