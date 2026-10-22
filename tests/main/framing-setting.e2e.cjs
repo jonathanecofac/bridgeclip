@@ -1,0 +1,30 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { buildApp, launchApp } = require('../zernio/support/electron-app.cjs')
+
+test('Settings → Framing chooses how wide screen areas are shown and saves it', { timeout: 120000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-framing-e2e-'))
+  const userDataDir = path.join(root, 'user-data')
+  const appDir = process.env.BRIDGECLIP_E2E_APP_DIR || buildApp(path.join(root, 'app'))
+  const session = await launchApp({ appDir, userDataDir })
+  t.after(async () => { await session.close(); fs.rmSync(root, { recursive: true, force: true }) })
+  const { page } = session
+  const errors = []
+  page.on('pageerror', (error) => errors.push(error.message))
+
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+,' : 'Control+,')
+  const section = page.locator('#settings-framing')
+  const group = section.getByRole('radiogroup', { name: 'Wide screen content' })
+  await group.waitFor()
+  assert.equal(await group.getByRole('radio', { name: 'Show it whole' }).getAttribute('aria-checked'), 'true', 'whole by default')
+  await group.getByRole('radio', { name: 'Fill the panel' }).click()
+  await section.getByText(/its sides can be cut off/).waitFor()
+  const settingsFile = path.join(userDataDir, 'settings.json')
+  for (let i = 0; i < 50 && !(fs.existsSync(settingsFile) && JSON.parse(fs.readFileSync(settingsFile, 'utf8')).wideScreenFraming === 'fill'); i++) await new Promise((r) => setTimeout(r, 100))
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).wideScreenFraming, 'fill')
+  if (process.env.BRIDGECLIP_E2E_SHOTS) await section.screenshot({ path: path.join(process.env.BRIDGECLIP_E2E_SHOTS, 'framing-setting.png'), timeout: 30000 }).catch(() => {})
+  assert.deepEqual(errors, [])
+})

@@ -252,6 +252,9 @@ class ShotLayout:
     manual_from_crops: list[tuple[float, float, float, float]] = field(default_factory=list)
     manual_transition_start_ms: int = 0
     manual_transition_ms: int = 0
+    # Settings → Framing: show a very wide screen area whole (fitted over a
+    # blurred fill) rather than a fill crop that cuts its sides.
+    wide_fit: bool = True
 
     def summary(self) -> dict:
         return {
@@ -1546,6 +1549,9 @@ class LayoutAnalyzer:
 
         shots = bridge_face_dropouts(shots, scene_cuts, trace["boundaries"] if trace is not None else None)
         shots = self._merge_adjacent([apply_style(shot, style, src_w, src_h) for shot in shots])
+        if getattr(self.settings, 'wide_screen_framing', 'fit') == 'fill':
+            for shot in shots:
+                shot.wide_fit = False
         plan = ClipLayoutPlan(
             shots=shots, source_width=src_w, source_height=src_h, vision_cost_usd=vision_cost,
             face_samples=[(f.t_ms, f.faces) for f in frames],

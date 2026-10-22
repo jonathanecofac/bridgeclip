@@ -658,6 +658,9 @@ class Settings(BaseSettings):
     jev_enabled: bool = False
     jev_visual_context: bool = False
     source_context_web_research: bool = False
+    # Screen + webcam shots whose active area is much wider than the screen
+    # panel: 'fit' shows it whole over a blurred fill, 'fill' crops to fill.
+    wide_screen_framing: Literal['fit', 'fill'] = 'fit'
     source_context_model: str = "google/gemini-3.8-flash"
 
     # Security - API authentication

@@ -1,6 +1,6 @@
 import { JevSettings } from '../components/JevSettings'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, Crop, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { useSettingsStore } from '../store/use-settings-store'
 import { useChangelogStore } from '../store/use-changelog-store'
 import { useApiKeyDrafts } from '../hooks/use-api-key-drafts'
@@ -16,6 +16,7 @@ import { Panel, PanelHeader } from '../components/ui/Panel'
 import { Button } from '../components/ui/Button'
 import { Field, TextArea, TextInput } from '../components/ui/Field'
 import { Badge, StatusDot } from '../components/ui/Badge'
+import { Segmented } from '../components/ui/Segmented'
 import { IconTile } from '../components/ui/IconTile'
 import { Callout } from '../components/ui/Callout'
 import { UpdatesRow } from '../components/Updates'
@@ -24,12 +25,12 @@ import { AssistantSettings } from '../components/assistant/AssistantSettings'
 import { useAssistantStore } from '../store/use-assistant-store'
 import { takeSettingsSection } from '../lib/settings-focus'
 
-type SectionId = 'keys' | 'assistant' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
+type SectionId = 'keys' | 'assistant' | 'jev' | 'framing' | 'vocabulary' | 'output' | 'system' | 'about'
 type SectionTone = 'success' | 'warning' | 'danger' | 'idle'
 
 /** `showUpdates` changes each time Help → Check for Updates… asks for the Updates row. */
 export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): React.JSX.Element {
-  const { outputDirectory, pythonPath, customVocabulary, openrouterConfigured, zernioConfigured, sourceContextWebResearch, saving, save, toolStatus, toolError, checkTools, checkingTools } =
+  const { outputDirectory, pythonPath, customVocabulary, openrouterConfigured, zernioConfigured, sourceContextWebResearch, wideScreenFraming, saving, save, toolStatus, toolError, checkTools, checkingTools } =
     useSettingsStore()
   const keys = useApiKeyDrafts()
   const [isPackaged, setIsPackaged] = useState(true)
@@ -64,6 +65,7 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
     { id: 'keys', label: 'API keys', icon: <KeyRound />, tone: keysMissing ? 'warning' : 'success' },
     { id: 'assistant', label: 'Assistant', icon: <Sparkles />, tone: assistantConnected ? 'success' : 'idle' },
     { id: 'jev', label: 'TypeSafe Jev', icon: <SlidersHorizontal />, tone: 'idle' },
+    { id: 'framing', label: 'Framing', icon: <Crop />, tone: 'idle' },
     { id: 'vocabulary', label: 'Vocabulary', icon: <BookA />, tone: 'idle' },
     { id: 'output', label: 'Output', icon: <FolderOpen />, tone: 'idle' },
     { id: 'system', label: 'System check', icon: <Cpu />, tone: !toolsChecked ? 'idle' : toolsMissing ? 'danger' : 'success' },
@@ -198,6 +200,25 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
           </Section>
 
           <JevSettings />
+
+          <Section id="framing">
+            <PanelHeader
+              icon={<IconTile><Crop /></IconTile>}
+              title="Framing"
+              description="Screen + webcam clips put the screen above the webcam. When the important part of the screen is much wider than that panel (a game board, two cards side by side, a wide chart), choose how to show it."
+            />
+            <div className="mt-4 space-y-2">
+              <Segmented label="Wide screen content" size="sm" value={wideScreenFraming === 'fill' ? 'fill' : 'fit'}
+                onChange={(value) => { void commit({ wideScreenFraming: value }) }}
+                options={[{ value: 'fit', label: 'Show it whole' }, { value: 'fill', label: 'Fill the panel' }]} />
+              <p className="text-xs text-ink-subtle">
+                {wideScreenFraming === 'fill'
+                  ? 'The screen fills its panel edge to edge, cropped around the important part; its sides can be cut off.'
+                  : 'The whole important part is shown, centered over a blurred copy of the screen, with the clip title above it. It appears a little smaller.'}
+                {' '}Other screens always fill their panel. Applies to new clips.
+              </p>
+            </div>
+          </Section>
 
           <Section id="vocabulary">
             <PanelHeader

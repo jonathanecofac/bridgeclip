@@ -46,6 +46,8 @@ export interface ClipSettings extends JevThresholdSettings {
   jevEnabled: string
   jevVisualContext: string
   sourceContextWebResearch: string
+  /** 'fit' or 'fill': see shared/framing. */
+  wideScreenFraming: string
   outputDirectory: string
   pythonPath: string
   customVocabulary: string

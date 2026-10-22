@@ -1,4 +1,5 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS, type JevThresholdSettings } from '../shared/jev-settings'
+import { FRAMING_DEFAULTS, isWideScreenFraming } from '../shared/framing'
 import { app, safeStorage } from 'electron'
 import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join } from 'path'
@@ -19,6 +20,8 @@ export interface AppSettings extends JevThresholdSettings {
   jevVisualContext: string
   /** Opt-in beta: web research of public sources before transcription. */
   sourceContextWebResearch: string
+  /** Screen + webcam shots with a very wide screen area: 'fit' (whole, over a blurred fill) or 'fill'. */
+  wideScreenFraming: string
   outputDirectory: string
   pythonPath: string
   /** Names and jargon the speech-to-text should spell correctly, one per line. */
@@ -26,7 +29,7 @@ export interface AppSettings extends JevThresholdSettings {
 }
 
 export type ApiKeyName = 'openrouterApiKey' | 'zernioApiKey'
-export type PublicSettings = Pick<AppSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | keyof JevThresholdSettings> & {
+export type PublicSettings = Pick<AppSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | 'wideScreenFraming' | keyof JevThresholdSettings> & {
   openrouterConfigured: boolean
   zernioConfigured: boolean
 }
@@ -37,6 +40,7 @@ type SecretKey = (typeof SECRET_KEYS)[number]
 const DEFAULT_SETTINGS: AppSettings = {
   ...JEV_DEFAULTS,
   ...JEV_FEATURE_DEFAULTS,
+  ...FRAMING_DEFAULTS,
   openrouterApiKey: '',
   zernioApiKey: '',
   outputDirectory: join(app.getPath('home'), 'BridgeClip'),
@@ -62,6 +66,7 @@ interface PersistedSettings extends JevThresholdSettings {
   jevEnabled: string
   jevVisualContext: string
   sourceContextWebResearch: string
+  wideScreenFraming?: string
   outputDirectory: string
   pythonPath: string
   customVocabulary?: string
@@ -97,6 +102,7 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     jevEnabled: settings.jevEnabled ?? DEFAULT_SETTINGS.jevEnabled,
     jevVisualContext: settings.jevVisualContext ?? DEFAULT_SETTINGS.jevVisualContext,
     sourceContextWebResearch: settings.sourceContextWebResearch ?? DEFAULT_SETTINGS.sourceContextWebResearch,
+    wideScreenFraming: settings.wideScreenFraming ?? DEFAULT_SETTINGS.wideScreenFraming,
     outputDirectory: (settings.outputDirectory || DEFAULT_SETTINGS.outputDirectory).trim(),
     pythonPath: (settings.pythonPath || DEFAULT_SETTINGS.pythonPath).trim(),
     customVocabulary: vocabularyTerms(settings.customVocabulary ?? DEFAULT_SETTINGS.customVocabulary).join('\n')
@@ -111,6 +117,7 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
   if (!SWITCHES.includes(normalized.jevEnabled)) throw new Error('Invalid Jev review setting')
   if (!SWITCHES.includes(normalized.jevVisualContext)) throw new Error('Invalid visual context setting')
   if (!SWITCHES.includes(normalized.sourceContextWebResearch)) throw new Error('Invalid source research setting')
+  if (!isWideScreenFraming(normalized.wideScreenFraming)) throw new Error('Invalid framing setting')
   if (!isAbsolute(normalized.outputDirectory)) throw new Error('Settings folders must be absolute paths')
   return normalized
 }
@@ -204,6 +211,8 @@ export function loadSettings(): AppSettings {
     const settings = normalizeSettings({
       ...secrets,
       ...savedJevSettings(raw),
+      // A preference: an unreadable value falls back to the default.
+      wideScreenFraming: isWideScreenFraming(raw.wideScreenFraming) ? raw.wideScreenFraming : DEFAULT_SETTINGS.wideScreenFraming,
       outputDirectory: typeof raw.outputDirectory === 'string' ? raw.outputDirectory : DEFAULT_SETTINGS.outputDirectory,
       pythonPath: typeof raw.pythonPath === 'string' ? raw.pythonPath : DEFAULT_SETTINGS.pythonPath,
       customVocabulary: typeof raw.customVocabulary === 'string' ? raw.customVocabulary : DEFAULT_SETTINGS.customVocabulary
@@ -235,6 +244,7 @@ function writeSettings(settings: AppSettings): void {
     jevEnabled: settings.jevEnabled,
     jevVisualContext: settings.jevVisualContext,
     sourceContextWebResearch: settings.sourceContextWebResearch,
+    wideScreenFraming: settings.wideScreenFraming,
     outputDirectory: settings.outputDirectory,
     pythonPath: settings.pythonPath,
     customVocabulary: settings.customVocabulary
@@ -277,11 +287,12 @@ export function publicSettings(settings: AppSettings): PublicSettings {
     zernioConfigured: Boolean(settings.zernioApiKey),
     jevEnabled: settings.jevEnabled,
     jevVisualContext: settings.jevVisualContext,
-    sourceContextWebResearch: settings.sourceContextWebResearch
+    sourceContextWebResearch: settings.sourceContextWebResearch,
+    wideScreenFraming: settings.wideScreenFraming
   }
 }
 
-export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | keyof JevThresholdSettings>): PublicSettings {
+export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | keyof JevThresholdSettings> & Partial<Pick<PublicSettings, 'wideScreenFraming'>>): PublicSettings {
   const current = loadSettings()
   return publicSettings(saveSettings({
     ...current,
@@ -297,7 +308,8 @@ export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory
     customVocabulary: update.customVocabulary,
     jevEnabled: update.jevEnabled ?? current.jevEnabled,
     jevVisualContext: update.jevVisualContext ?? current.jevVisualContext,
-    sourceContextWebResearch: update.sourceContextWebResearch ?? current.sourceContextWebResearch
+    sourceContextWebResearch: update.sourceContextWebResearch ?? current.sourceContextWebResearch,
+    wideScreenFraming: update.wideScreenFraming ?? current.wideScreenFraming
   }))
 }
 
@@ -331,6 +343,7 @@ export function getSettingsForBridge(settings: AppSettings): Record<string, stri
   return {
     OPENROUTER_API_KEY: settings.openrouterApiKey,
     SOURCE_CONTEXT_WEB_RESEARCH: settings.sourceContextWebResearch !== 'off' ? 'true' : 'false',
+    WIDE_SCREEN_FRAMING: settings.wideScreenFraming === 'fill' ? 'fill' : 'fit',
     JEV_THRESHOLD: settings.jevThreshold,
     JEV_SELF_CONTAINED_THRESHOLD: settings.jevSelfContainedThreshold,
     JEV_FAITHFUL_TO_SOURCE_THRESHOLD: settings.jevFaithfulToSourceThreshold,

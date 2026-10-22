@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-22
+
+### Fixed
+
+- **Screen + webcam clips** no longer cut off a wide screen area (a game board, two cards side by side, a wide chart) or leave it stuck to the top of the frame over empty space. The whole area is now shown, centered over a blurred copy of the screen, with the clip title above it. Screens that fit are framed as before.
+
+### Added
+
+- **Settings → Framing**: choose **Show it whole** (the new default) or **Fill the panel** (the previous framing, which crops the sides) for wide screen areas.
+
 ## [0.6.0] - 2026-10-22
 
 ### Added
@@ -158,7 +168,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.6.1
 [0.6.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.5.0
 [0.4.1]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.1

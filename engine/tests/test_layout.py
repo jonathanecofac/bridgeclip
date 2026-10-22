@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 
+import cv2
 import numpy as np
 import pytest
 
@@ -45,6 +46,7 @@ from clip_engine.services.layout_renderer import (
     shot_chain,
     stacked_panel_heights,
     step_expr,
+    title_y,
 )
 from clip_engine.services.rendering_service import RenderingService
 
@@ -398,9 +400,10 @@ class TestFilterGraph:
     @pytest.mark.parametrize('focus', [None, Box(.04, .12, .88, .4), Box(.3, .4, .1, .05)])
     def test_screen_and_webcam_top_panel_fills_without_bars(self, focus):
         # Maintainer decision: keep main's fill (the reported case is a
-        # 1080x1152 panel), not a fitted screen with 171 px bars.
+        # 1080x1152 panel), not a fitted screen with 171 px bars. Settings →
+        # Framing "Fill the panel" keeps exactly this for wide active areas too.
         shot = ShotLayout(0, 5000, LayoutType.SCREEN_CAM, cam_box=Box(.78, .70, .2, .28),
-                          cam_face=Box(.85, .75, .06, .12), screen_box=Box(0, 0, 1, 1), screen_focus=focus)
+                          cam_face=Box(.85, .75, .06, .12), screen_box=Box(0, 0, 1, 1), screen_focus=focus, wide_fit=False)
         top, _ = stacked_panel_heights(shot, SRC_H, 1920)
         assert top == 1152
         (w, h, x, y), destination = screen_view(shot, SRC_W, SRC_H, 1080, top)
@@ -413,6 +416,68 @@ class TestFilterGraph:
         chain = shot_chain(0, shot, SRC_W, SRC_H, 1080, 1920)
         assert f"crop={w}:{h}:{x}:{y},scale=1080:{top}:flags=lanczos[top0]" in chain
         assert "pad=" not in chain
+
+    @pytest.mark.parametrize('focus', [None, Box(.3, .4, .1, .05), Box(.2, .2, .45, .5)])
+    def test_screen_panel_still_fills_when_the_active_area_fits(self, focus):
+        # The default only changes areas much wider than the panel.
+        shot = ShotLayout(0, 5000, LayoutType.SCREEN_CAM, cam_box=Box(.78, .70, .2, .28),
+                          screen_box=Box(0, 0, 1, 1), screen_focus=focus)
+        top, _ = stacked_panel_heights(shot, SRC_H, 1920)
+        assert screen_view(shot, SRC_W, SRC_H, 1080, top)[1] == (0, 0, 1080, top)
+
+    def test_wide_active_area_is_shown_whole_and_centered(self):
+        # Reported case: a city quiz with two cards side by side, webcam at the
+        # top right over the game. The fill crop cut both cards and left the
+        # content stuck to the top over empty space.
+        focus = Box(.15, .108, .702, .5)
+        shot = ShotLayout(0, 5000, LayoutType.SCREEN_CAM, screen_box=Box(.12, .027, .762, .95),
+                          screen_focus=focus, cam_box=Box(.7609, .0306, .2219, .2494))
+        top, _ = stacked_panel_heights(shot, SRC_H, 1920)
+        (w, h, x, y), (dx, dy, dw, dh) = screen_view(shot, SRC_W, SRC_H, 1080, top)
+        assert x <= focus.x * SRC_W and x + w >= (focus.x + focus.w) * SRC_W, 'both cards whole'
+        assert y <= focus.y * SRC_H and y + h >= (focus.y + focus.h) * SRC_H
+        assert (dx, dw) == (0, 1080) and dh < top and abs(dy - (top - dh - dy)) <= 2, 'centered in the screen panel'
+        assert dw / dh == pytest.approx(w / h, rel=.01)
+        assert shot_views(shot, 0, SRC_W, SRC_H, 1080, 1920)[0] == ((x, y, w, h), (dx, dy, dw, dh))
+        assert title_y(shot, SRC_W, SRC_H, 1080, 1920, 150) + 150 <= dy, 'the clip title sits above the content'
+        chain = shot_chain(0, shot, SRC_W, SRC_H, 1080, 1920)
+        assert f"crop={w}:{h}:{x}:{y},split=2" in chain and "gblur" in chain and f"overlay=0:{dy}[top0]" in chain
+        shot.wide_fit = False
+        assert screen_view(shot, SRC_W, SRC_H, 1080, top)[1] == (0, 0, 1080, top), 'Fill the panel keeps the crop'
+
+    def test_wide_active_area_leaves_the_webcam_out_only_when_nothing_is_cut(self):
+        # Webcam in a corner below the content: trimmed away, the area stays whole.
+        focus = Box(.05, .1, .9, .35)
+        shot = ShotLayout(0, 5000, LayoutType.SCREEN_CAM, screen_box=Box(0, 0, 1, 1), screen_focus=focus,
+                          cam_box=Box(.78, .62, .2, .3))
+        top, _ = stacked_panel_heights(shot, SRC_H, 1920)
+        (w, h, x, y), _ = screen_view(shot, SRC_W, SRC_H, 1080, top)
+        assert y + h <= (.62 - .3 * .15) * SRC_H + 2 and x <= focus.x * SRC_W and x + w >= (focus.x + focus.w) * SRC_W
+        assert y <= focus.y * SRC_H and y + h >= (focus.y + focus.h) * SRC_H
+
+    @pytest.mark.skipif(not TEST_FFMPEG, reason="ffmpeg not installed")
+    def test_ffmpeg_renders_a_wide_active_area_whole(self, tmp_path):
+        # Corner markers of a wide board must all survive; the old fill crop lost the outer ones.
+        frame = np.full((SRC_H, SRC_W, 3), 235, dtype=np.uint8)
+        marks = [(300, 140), (1580, 140), (300, 600), (1580, 600)]
+        for mx, my in marks:
+            frame[my:my + 40, mx:mx + 40] = (0, 0, 255)
+        src = tmp_path / 'board.png'
+        cv2.imwrite(str(src), frame)
+        shot = ShotLayout(0, 1000, LayoutType.SCREEN_CAM, screen_box=Box(.12, .027, .762, .95),
+                          screen_focus=Box(.15, .108, .702, .5), cam_box=Box(.7609, .0306, .2219, .2494))
+        out = tmp_path / 'out.png'
+        graph = '[0:v]format=yuv420p[t0];' + shot_chain(0, shot, SRC_W, SRC_H, 1080, 1920)
+        subprocess.run([TEST_FFMPEG, '-v', 'error', '-y', '-loop', '1', '-t', '0.1', '-i', str(src), '-filter_complex', graph,
+                        '-map', '[v0]', '-frames:v', '1', str(out)], check=True)
+        image = cv2.imread(str(out))
+        assert image.shape[:2] == (1920, 1080)
+        top, _ = stacked_panel_heights(shot, SRC_H, 1920)
+        (w, h, x, y), (dx, dy, dw, dh) = screen_view(shot, SRC_W, SRC_H, 1080, top)
+        for mx, my in marks:
+            px, py = int((mx + 20 - x) * dw / w), int(dy + (my + 20 - y) * dh / h)
+            b, g, r = image[py, px]
+            assert r > 180 and b < 120, f'marker at {mx},{my} is visible'
 
     def test_graph_has_every_shot(self):
         graph = build_layout_graph(mixed_plan(), 1080, 1920)
@@ -558,3 +623,14 @@ class TestDetector:
         thread.start()
         thread.join()
         assert other and other[0] is not own
+
+
+def test_wide_screen_framing_follows_the_app_setting(monkeypatch):
+    from pydantic import ValidationError
+    from clip_engine.config import Settings
+    assert Settings().wide_screen_framing == 'fit'
+    monkeypatch.setenv('WIDE_SCREEN_FRAMING', 'fill')
+    assert Settings().wide_screen_framing == 'fill'
+    monkeypatch.setenv('WIDE_SCREEN_FRAMING', 'stretch')
+    with pytest.raises(ValidationError):
+        Settings()

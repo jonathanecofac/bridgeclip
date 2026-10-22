@@ -40,6 +40,12 @@ PERSON_CROP_FACE_MULT = 3.2
 PERSON_FACE_Y = 0.40
 # Margin around the webcam box kept out of the screen panel (share of its size).
 AVOID_MARGIN = 0.15
+# A screen's active area this much wider than the panel can show (a game board,
+# two cards side by side, a wide chart) is shown whole, fitted to the panel's
+# width over a blurred fill, instead of a fill crop that cuts both sides.
+WIDE_FOCUS_RATIO = 1.12
+# Vertical room kept around a fitted active area (share of its padded height).
+WIDE_FOCUS_HEADROOM = 1.2
 
 
 def even(value: float) -> int:
@@ -308,13 +314,58 @@ def screen_crop(
     return w, h, x, y
 
 
-def screen_view(shot: ShotLayout, src_w: int, src_h: int, panel_w: int, panel_h: int):
-    """Screen panel geometry shared by rendering and inspection.
+def wide_focus_crop(
+    screen: Optional[Box], focus: Optional[Box], src_w: int, src_h: int, panel_w: int, panel_h: int,
+    avoid: Optional[Box] = None,
+) -> Optional[tuple[int, int, int, int]]:
+    """The whole active area when it is too wide for a fill crop, else None.
 
-    The screen fills its whole panel (main's behavior for screen + webcam
-    shots): a panel-aspect crop that covers the focus area, so the panel
-    destination is always the full panel.
+    Returns a (w, h, x, y) crop wider than the panel's aspect: it is fitted to
+    the panel's width and centered on a blurred fill (see screen_view). The
+    webcam is left out only when that keeps the whole active area; otherwise
+    the content wins and the webcam may show in both panels.
     """
+    if focus is None:
+        return None
+    aspect = panel_w / panel_h
+    screen = screen or Box(0, 0, 1, 1)
+    bx, by, bw, bh = screen.x * src_w, screen.y * src_h, screen.w * src_w, screen.h * src_h
+    max_w = bh * aspect if bw / bh > aspect else bw
+    fw, fh = focus.w * src_w * 1.1, focus.h * src_h * 1.1
+    if fw <= max_w * WIDE_FOCUS_RATIO:
+        return None
+    crop_w = min(fw, bw)
+    crop_h = min(bh, crop_w / aspect, fh * WIDE_FOCUS_HEADROOM)
+    w, h, x, y = _fit_rect(focus.cx * src_w, focus.cy * src_h, crop_w, crop_h, (bx, by, bw, bh))
+    if avoid is not None:
+        mx, my = avoid.w * AVOID_MARGIN * src_w, avoid.h * AVOID_MARGIN * src_h
+        ax0, ax1 = avoid.x * src_w - mx, (avoid.x + avoid.w) * src_w + mx
+        ay0, ay1 = avoid.y * src_h - my, (avoid.y + avoid.h) * src_h + my
+        if x < ax1 and x + w > ax0 and y < ay1 and y + h > ay0:
+            f0, f1 = focus.x * src_w, (focus.x + focus.w) * src_w
+            g0, g1 = focus.y * src_h, (focus.y + focus.h) * src_h
+            options = [(x, y, ax0 - x, h), (ax1, y, x + w - ax1, h), (x, y, w, ay0 - y), (x, ay1, w, y + h - ay1)]
+            for ox, oy, ow, oh in options:
+                if ox <= f0 and ox + ow >= f1 and oy <= g0 and oy + oh >= g1 and ow / oh > aspect:
+                    left, top = int(ox + 1) // 2 * 2, int(oy + 1) // 2 * 2
+                    w, h, x, y = even(ox + ow - left), even(oy + oh - top), left, top
+                    break
+    return w, h, x, y
+
+
+def screen_view(shot: ShotLayout, src_w: int, src_h: int, panel_w: int, panel_h: int):
+    """Screen panel geometry shared by rendering and inspection: (crop, destination).
+
+    Usually the screen fills its whole panel: a panel-aspect crop that covers
+    the focus area. An active area too wide for that is shown whole, fitted to
+    the panel's width and centered vertically (the rest is a blurred fill).
+    A webcam inside that area stays visible there, as it is in the source.
+    """
+    wide = wide_focus_crop(shot.screen_box, shot.screen_focus, src_w, src_h, panel_w, panel_h, shot.cam_box) if shot.wide_fit else None
+    if wide is not None:
+        w, h, _, _ = wide
+        fit_h = min(panel_h, even(panel_w * h / w))
+        return wide, (0, (panel_h - fit_h) // 4 * 2, panel_w, fit_h)
     rect = screen_crop(shot.screen_box, shot.screen_focus, src_w, src_h, panel_w, panel_h, shot.cam_box)
     return rect, (0, 0, panel_w, panel_h)
 
@@ -447,11 +498,20 @@ def shot_chain(
     if shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None:
         # The webcam always fills its panel edge to edge (see cam_crop).
         cam_rect = cam_crop(shot.cam_box, shot.cam_face, src_w, src_h, out_w, bottom_h)
-        screen_rect, _ = screen_view(shot, src_w, src_h, out_w, top_h)
+        screen_rect, (_, dy, _, dh) = screen_view(shot, src_w, src_h, out_w, top_h)
+        if dh < top_h:
+            # Wide active area: whole, at the panel's width, over a blurred fill of itself.
+            bg_w, bg_h = even(out_w // 4), even(top_h // 4)
+            top = (f"[sa{i}]{_crop(screen_rect)},split=2[sw{i}][sf{i}];"
+                   f"[sw{i}]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,crop={bg_w}:{bg_h},"
+                   f"gblur=sigma=10,lutyuv=y=val-20,scale={out_w}:{top_h}[sbg{i}];"
+                   f"[sf{i}]scale={out_w}:{dh}:{scale}[sfg{i}];")
+            top += f"[sbg{i}][sfg{i}]overlay=0:{dy}[top{i}];"
+        else:
+            top = f"[sa{i}]{_crop(screen_rect)},scale={out_w}:{top_h}:{scale}[top{i}];"
         return (
             f"[t{i}]split=2[sa{i}][sb{i}];"
-            f"[sa{i}]{_crop(screen_rect)},"
-            f"scale={out_w}:{top_h}:{scale}[top{i}];"
+            + top +
             f"[sb{i}]{_crop(cam_rect)},scale={out_w}:{bottom_h}:{scale}[bot{i}];"
             f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[v{i}]"
         )
@@ -689,6 +749,12 @@ def caption_anchor(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: 
 
 
 def title_y(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int, title_h: int) -> int:
+    if shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None and not shot.manual_crops and shot.content_box is None:
+        # A fitted wide screen leaves a band above it: the title goes there, off the content.
+        top_h, _ = stacked_panel_heights(shot, src_h, out_h)
+        _, (_, dy, _, dh) = screen_view(shot, src_w, src_h, out_w, top_h)
+        if dh < top_h and dy > title_h + 20:
+            return max(10, dy // 2 - title_h // 2)
     if shot.layout == LayoutType.SCREEN:
         _, overlay_y = foreground_geometry(shot, src_w, src_h, out_w, out_h)
         if overlay_y > title_h + 20:

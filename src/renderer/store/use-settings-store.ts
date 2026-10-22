@@ -1,4 +1,5 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS } from '../../shared/jev-settings'
+import { FRAMING_DEFAULTS } from '../../shared/framing'
 import { create } from 'zustand'
 import { errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
@@ -26,6 +27,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   zernioConfigured: false,
   ...JEV_DEFAULTS,
   ...JEV_FEATURE_DEFAULTS,
+  ...FRAMING_DEFAULTS,
   outputDirectory: '',
   pythonPath: 'python3',
   customVocabulary: '',
@@ -99,6 +101,7 @@ function pickSettings(s: ClipSettings): ClipSettings {
     jevEnabled: s.jevEnabled ?? JEV_FEATURE_DEFAULTS.jevEnabled,
     jevVisualContext: s.jevVisualContext ?? JEV_FEATURE_DEFAULTS.jevVisualContext,
     sourceContextWebResearch: s.sourceContextWebResearch ?? JEV_FEATURE_DEFAULTS.sourceContextWebResearch,
+    wideScreenFraming: s.wideScreenFraming ?? FRAMING_DEFAULTS.wideScreenFraming,
     zernioConfigured: s.zernioConfigured,
     outputDirectory: s.outputDirectory,
     pythonPath: s.pythonPath,
