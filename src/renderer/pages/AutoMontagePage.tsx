@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Clapperboard, Download, Film, Music, Play, RefreshCw, RotateCcw, Save, Sparkles, Trash2, Upload, Wand2, X } from 'lucide-react'
+import { Check, Clapperboard, Copy, Download, Film, Music, Play, RefreshCw, RotateCcw, Save, Sparkles, Trash2, Upload, Wand2, X } from 'lucide-react'
 import {
-  ANALYSIS_PHASES, DEFAULT_MONTAGE_REQUEST, MONTAGE_DURATIONS, MONTAGE_PHASES, MONTAGE_STYLES, styleName,
+  ANALYSIS_PHASES, DEFAULT_LONG_REQUEST, DEFAULT_MONTAGE_REQUEST, DEFAULT_SHORT_REQUEST, LONG_DURATIONS, MAX_LONG_VIDEOS, MONTAGE_DURATIONS, MONTAGE_PHASES,
+  MONTAGE_STYLES, chapterTime, styleName, youtubeChapters,
   type MontageJob, type MontageRequest, type MontageState, type Rush
 } from '../../shared/montage'
 import { Badge } from '../components/ui/Badge'
@@ -45,11 +46,17 @@ function rushStatus(rush: Rush, analyzing?: { phase: string; percent: number }):
  * an instruction into planned edits that FFmpeg assembles into an editor
  * project, ready to fine-tune in the editor or export straight away.
  */
+let lastRequest: MontageRequest = { ...DEFAULT_MONTAGE_REQUEST }
+
 export function AutoMontagePage({ onNavigate, onViewLibrary }: { onNavigate: (page: PageName) => void; onViewLibrary: (outputDir: string) => void }): React.JSX.Element {
   const [state, setState] = useState<MontageState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [request, setRequest] = useState<MontageRequest>({ ...DEFAULT_MONTAGE_REQUEST })
+  // The form is kept while BridgeClip is open, so opening a montage in the editor and coming back keeps your settings.
+  const [request, setRequestState] = useState<MontageRequest>(() => ({ ...lastRequest }))
+  const setRequest = useCallback((update: (r: MontageRequest) => MontageRequest): void => {
+    setRequestState((r) => { lastRequest = update(r); return lastRequest })
+  }, [])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [preview, setPreview] = useState<string | null>(null)
   const [music, setMusic] = useState<string | null>(null)
@@ -182,18 +189,25 @@ export function AutoMontagePage({ onNavigate, onViewLibrary }: { onNavigate: (pa
           <TextArea aria-label="Instructions for the AI" rows={4} maxLength={2000} value={request.instruction} onChange={(e) => set({ instruction: e.target.value })}
             placeholder="Describe what you want: the moments, the tone, the number of versions…" />
         </Field>
-        <Segmented label="Montage type" size="sm" value={request.mode} onChange={() => {}}
-          options={[{ value: 'short', label: 'Short clips' }, { value: 'long' as 'short', label: 'Long video', disabled: 'Long videos come in the next version' }]} />
+        <Segmented label="Montage type" size="sm" value={request.mode} onChange={(mode) => { if (mode !== request.mode) set(mode === 'long' ? DEFAULT_LONG_REQUEST : DEFAULT_SHORT_REQUEST) }}
+          options={[{ value: 'short', label: 'Short clips' }, { value: 'long', label: 'Long video' }]} />
         <Segmented label="Format" size="sm" value={request.aspect} onChange={(aspect) => set({ aspect })}
           options={[{ value: '9:16', label: '9:16 TikTok · Shorts · Reels' }, { value: '16:9', label: '16:9' }, { value: '1:1' as '16:9', label: '1:1', disabled: 'Square comes in a next version' }]} />
         <div>
           <p className="mb-1.5 text-xs text-ink-muted">Length of each video</p>
-          <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Length of each video">
-            {[...MONTAGE_DURATIONS, null].map((d) => <button key={String(d)} type="button" role="radio" aria-checked={request.duration_s === d}
+          <div className="flex flex-wrap items-center gap-1.5" role="radiogroup" aria-label="Length of each video">
+            {(request.mode === 'long' ? LONG_DURATIONS : [...MONTAGE_DURATIONS, null]).map((d) => <button key={String(d)} type="button" role="radio" aria-checked={request.duration_s === d}
               className={cn('rounded-full border px-3 py-1 text-xs', request.duration_s === d ? 'border-accent/60 bg-accent/15 text-ink' : 'border-white/10 text-ink-muted')}
-              onClick={() => set({ duration_s: d })}>{d === null ? 'Free' : `${d}s`}</button>)}
+              onClick={() => set({ duration_s: d })}>{d === null ? 'Free' : request.mode === 'long' ? `${d / 60} min` : `${d}s`}</button>)}
+            {request.mode === 'long' && <label className="flex items-center gap-1 text-2xs text-ink-muted">
+              <input type="number" aria-label="Custom length in minutes" min={1} max={60} className="w-14 rounded-md border border-white/10 bg-transparent px-1.5 py-0.5 text-xs text-ink"
+                value={request.duration_s ? Math.round(request.duration_s / 60) : 10}
+                onChange={(e) => { const m = Math.round(Number(e.target.value)); if (m >= 1 && m <= 60) set({ duration_s: m * 60 }) }} />min</label>}
           </div>
         </div>
+        {request.mode === 'long' && <Segmented label="Structure" size="sm" value={request.structure} onChange={(structure) => set({ structure })}
+          options={[{ value: 'auto', label: 'Decide for me' }, { value: 'story', label: 'Story' }, { value: 'compilation', label: 'Compilation' }]} />}
+        {request.mode === 'long' && <p className="-mt-2 text-2xs text-ink-subtle">A story follows the filming order with an introduction, a development and a conclusion, only when the rushes really tell one; otherwise the moments are grouped by theme.</p>}
         <div>
           <p className="mb-1.5 text-xs text-ink-muted">Style</p>
           <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label="Style">{MONTAGE_STYLES.map((s) =>
@@ -203,18 +217,22 @@ export function AutoMontagePage({ onNavigate, onViewLibrary }: { onNavigate: (pa
         </div>
         <div className="grid grid-cols-2 gap-2">
           <Field label="Number of videos"><Select aria-label="Number of videos" size="sm" value={String(request.count)}
-            options={[1, 2, 3, 5, 8, 10, 15, 20, 30, 50].map((n) => ({ value: String(n), label: String(n) }))} onChange={(v) => set({ count: Number(v) })} /></Field>
+            options={(request.mode === 'long' ? Array.from({ length: MAX_LONG_VIDEOS }, (_, i) => i + 1) : [1, 2, 3, 5, 8, 10, 15, 20, 30, 50]).map((n) => ({ value: String(n), label: String(n) }))}
+            onChange={(v) => set({ count: Number(v) })} /></Field>
           <Field label="From"><p className="pt-1.5 text-xs text-ink">{chosen.length ? `${chosen.length} selected rush${chosen.length === 1 ? '' : 'es'}` : `All ${ready.length} ready rushes`}</p></Field>
         </div>
         <div className="space-y-2">
-          {([['captions', 'Captions from the dialogue'], ['smart_framing', 'Smart framing on people'], ['hook', 'Hook text in the first seconds'], ['auto_export', 'Export automatically to the Library']] as const).map(([key, label]) =>
+          {(request.mode === 'long'
+            ? [['captions', 'Captions from the dialogue'], ['smart_framing', 'Smart framing on people'], ['cut_silences', 'Cut silences and dead time'],
+               ['chapters', 'Chapter titles on screen'], ['intro_outro', 'Intro and outro when the content allows'], ['auto_export', 'Export automatically to the Library']] as const
+            : [['captions', 'Captions from the dialogue'], ['smart_framing', 'Smart framing on people'], ['hook', 'Hook text in the first seconds'], ['auto_export', 'Export automatically to the Library']] as const).map(([key, label]) =>
             <label key={key} className="flex items-center justify-between gap-2 text-xs text-ink">{label}<Switch label={label} checked={request[key]} onChange={(on) => set({ [key]: on })} /></label>)}
         </div>
         <div className="space-y-2 rounded-xl border border-white/[0.06] p-2.5">
           <div className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-2 text-xs text-ink"><Music size={13} />{music ? <span className="truncate" title={music}>{music.split(/[\\/]/).pop()}</span> : 'No music'}</span>
             <div className="flex gap-1">{music && <Button size="sm" variant="ghost" iconOnly icon={<X size={12} />} aria-label="Remove music" onClick={() => setMusic(null)} />}
               <Button size="sm" variant="ghost" onClick={() => { void getApi().montage.chooseMusic().then((p) => { if (p) setMusic(p) }).catch((e) => setError(errorMessage(e))) }}>{music ? 'Change' : 'Add music…'}</Button></div></div>
-          {music && <label className="flex items-center justify-between gap-2 text-xs text-ink">Cut on the beat<Switch label="Cut on the beat" checked={request.beat_sync} onChange={(beat_sync) => set({ beat_sync })} /></label>}
+          {music && request.mode === 'short' && <label className="flex items-center justify-between gap-2 text-xs text-ink">Cut on the beat<Switch label="Cut on the beat" checked={request.beat_sync} onChange={(beat_sync) => set({ beat_sync })} /></label>}
         </div>
         <Button className="w-full" icon={<Sparkles size={14} />} loading={busy === 'generate'} disabled={!ready.length} onClick={generate}>Generate the montage</Button>
         {!ready.length && <p className="text-2xs text-ink-subtle">Import rushes and wait for their analysis first.</p>}
@@ -235,16 +253,24 @@ function JobRow({ job, busy, act, onViewLibrary }: { job: MontageJob; busy: stri
   const r = job.request
   const status = JOB_STATUS[job.status]
   const active = job.status === 'queued' || job.status === 'running' || job.status === 'exporting'
+  const [copied, setCopied] = useState<number | null>(null)
+  useEffect(() => { if (copied === null) return; const t = setTimeout(() => setCopied(null), 2000); return () => clearTimeout(t) }, [copied])
   return <li className="space-y-2 py-3" aria-label={`Montage ${styleName(r.style)} ${r.count}`}>
     <div className="flex flex-wrap items-center gap-2">
       <Badge tone={status.tone}>{status.label}</Badge>
-      <p className="min-w-0 flex-1 truncate text-sm text-ink" title={r.instruction}>{r.count} × {r.duration_s ? `${r.duration_s}s` : 'free length'} · {styleName(r.style)} · {r.aspect}{r.instruction ? ` · “${r.instruction}”` : ''}</p>
+      <p className="min-w-0 flex-1 truncate text-sm text-ink" title={r.instruction}>{r.count} × {r.duration_s ? (r.mode === 'long' ? `${Math.round(r.duration_s / 60)} min` : `${r.duration_s}s`) : 'free length'}{r.mode === 'long' ? ' long video' : ''} · {styleName(r.style)} · {r.aspect}{r.instruction ? ` · “${r.instruction}”` : ''}</p>
       <span className="text-2xs text-ink-subtle">{formatRelativeDate(job.createdAt)}</span>
     </div>
     {active && job.progress && <div className="space-y-1"><p className="text-2xs text-ink-muted">{MONTAGE_PHASES[job.progress.phase] ?? job.progress.phase}… {job.progress.percent}%</p><ProgressBar value={job.progress.percent} /></div>}
     {job.summary && <p className="text-2xs text-ink-subtle">{job.summary.videos} video{job.summary.videos === 1 ? '' : 's'} from {job.summary.rushes} rush{job.summary.rushes === 1 ? '' : 'es'} · planned by {job.summary.planner === 'ai' ? 'AI' : 'analysis scores'} · {Math.round(job.summary.seconds)}s{job.exported !== undefined ? ` · ${job.exported} exported` : ''}{job.music ? ` · music: ${job.music.name}` : ''}</p>}
     {job.summary?.notes.map((n) => <p key={n} className="text-2xs text-warning">{n}</p>)}
     {job.error && <p className="text-xs text-danger">{job.error}</p>}
+    {job.summary?.chapters?.map((v) => <details key={v.video} className="rounded-xl border border-white/[0.06] px-3 py-2 text-xs" aria-label={`Chapters of ${v.title}`}>
+      <summary className="cursor-pointer text-ink">{v.title} · {chapterTime(v.duration_ms)} · {v.structure === 'story' ? 'story' : 'compilation'} · {v.chapters.length} chapters</summary>
+      {v.description && <p className="mt-2 text-ink-muted">{v.description}</p>}
+      <pre className="mt-2 whitespace-pre-wrap font-mono text-2xs text-ink-muted">{youtubeChapters(v.chapters)}</pre>
+      <Button size="sm" variant="ghost" icon={<Copy size={12} />} className="mt-1" onClick={() => { void getApi().montage.copyChapters(job.id, v.video).then(() => setCopied(v.video), () => setCopied(null)) }}>{copied === v.video ? 'Copied' : 'Copy for YouTube'}</Button>
+    </details>)}
     <div className="flex flex-wrap gap-1.5">
       {job.status === 'done' && <Button size="sm" icon={<Film size={12} />} onClick={() => onViewLibrary(job.runDir)}>Open in editor</Button>}
       {job.status === 'done' && <Button size="sm" variant="ghost" icon={<Download size={12} />} loading={busy === `export:${job.id}`} onClick={() => { void act(`export:${job.id}`, () => getApi().montage.exportAll(job.id)) }}>Export all</Button>}

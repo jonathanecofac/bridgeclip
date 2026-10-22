@@ -233,3 +233,157 @@ def test_vertical_footage_and_music_with_beat_sync(library, monkeypatch, tmp_pat
         clock += b - a
         on_beat += min(abs(clock - (100 + 500 * k)) for k in range(40)) <= 45
     assert on_beat == len(c['ranges']) - 1, c['ranges']
+
+
+# ── Long videos ───────────────────────────────────────────────────────
+
+from clip_engine.montage import long_planner
+
+
+def make_dated(path, patterns, created, silent=None, seconds=6):
+    """A rush with a recording date; `silent` = (start, end) seconds of silence in its tone."""
+    inputs = [arg for p in patterns for arg in ('-f', 'lavfi', '-i', f'{p}=size=640x360:rate=30:duration={seconds}')]
+    graph = ';'.join(f'[{i}:v]format=yuv420p,setsar=1[v{i}]' for i in range(len(patterns))) + ';' + ''.join(f'[v{i}]' for i in range(len(patterns))) + f'concat=n={len(patterns)}:v=1:a=0[v]'
+    total = seconds * len(patterns)
+    gate = f'*(1-between(t,{silent[0]},{silent[1]}))' if silent else ''
+    cmd = ['ffmpeg', '-v', 'error', '-y', *inputs, '-f', 'lavfi', '-i', f"aevalsrc='0.3*sin(330*2*PI*t){gate}':s=48000:d={total}",
+           '-filter_complex', graph + f';[{len(patterns)}:a]anull[a]', '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+           '-c:a', 'aac', '-metadata', f'creation_time={created}', str(path)]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+
+
+def seg(i, rush, a, b, score=.5, text='', tags=(), filmed=None, hashes=()):
+    return planner.Segment(f's{i}', rush, f'{rush}.mp4', a, b, score, text, list(tags), filmed_ms=filmed, hashes=list(hashes))
+
+
+def test_long_requests_and_repeats():
+    long = planner.validate_request({'mode': 'long', 'count': 1, 'duration_s': 600, 'aspect': '16:9', 'style': 'vlog', 'structure': 'story'})
+    assert long['mode'] == 'long' and long['chapters'] and long['intro_outro'] and long['cut_silences'] and long['structure'] == 'story'
+    for bad in [{'mode': 'long', 'count': 6}, {'mode': 'long', 'duration_s': 30}, {'mode': 'long', 'structure': 'novel'}, {'mode': 'long', 'chapters': 1}]:
+        with pytest.raises(planner.PlanError):
+            planner.validate_request({'count': 1, 'duration_s': 600, 'aspect': '16:9', 'style': 'vlog', **bad})
+    words = 'nous voici enfin arrivés au sommet de la montagne'
+    segments = [seg(1, 'a', 0, 5000, .9, words), seg(2, 'b', 0, 5000, .4, words + ' !'), seg(3, 'c', 0, 4000, .7, hashes=['00ff00ff00ff00ff', 'ffff0000ffff0000']),
+                seg(4, 'd', 0, 4000, .3, hashes=['00ff00ff00ff00fe', 'ffff0000ffff0001']), seg(5, 'e', 0, 4000, .5, hashes=['0123456789abcdef', 'fedcba9876543210'])]
+    ranked = {s.id: s.score for s in segments}
+    assert long_planner.repeats(segments, ranked) == {'s2', 's4'}, 'the weaker copy of the same words or footage goes'
+
+
+def test_silences_are_cut_inside_pieces():
+    analysis = {'energy': {'step_ms': 250, 'db': [-20] * 20 + [-80] * 8 + [-20] * 12}, 'transcript': [{'words': [[1000, 1400, 'Bonjour']]}]}
+    pieces = long_planner.cut_silences({'id': 'x', 'rush_id': 'r', 'start_ms': 0, 'end_ms': 10000}, analysis)
+    assert [(p['start_ms'], p['end_ms']) for p in pieces] == [(0, 5150), (6850, 10000)], 'a 2 s silence becomes a 300 ms breath'
+    talking = {'energy': {'step_ms': 250, 'db': [-20] * 20 + [-80] * 8 + [-20] * 12}, 'transcript': [{'words': [[5100, 6900, 'chut']]}]}
+    assert len(long_planner.cut_silences({'id': 'x', 'rush_id': 'r', 'start_ms': 0, 'end_ms': 10000}, talking)) == 1, 'quiet words are not silence'
+
+
+def test_long_heuristic_tells_a_story_or_compiles_by_theme():
+    day = 86_400_000
+    segments = [seg(1, 'beach', 0, 60000, .6, filmed=3 * day, tags=['beach']), seg(2, 'beach', 60000, 120000, .7, filmed=3 * day + 60000, tags=['beach']),
+                seg(3, 'hotel', 0, 60000, .5, filmed=day, tags=['hotel']), seg(4, 'party', 0, 90000, .9, filmed=5 * day, tags=['party'])]
+    request = planner.validate_request({'mode': 'long', 'count': 1, 'duration_s': 240, 'aspect': '16:9', 'style': 'vlog'})
+    story = long_planner.heuristic_long(request, segments, set())
+    assert story['structure'] == 'story'
+    assert [c['title'] for c in story['chapters']] and [p['id'] for c in story['chapters'] for p in c['segments']] == ['s3', 's1', 's2', 's4'], 'in filming order'
+    assert story['teaser'] and story['teaser'][0]['id'] == 's4' and story['teaser'][0]['end_ms'] - story['teaser'][0]['start_ms'] == long_planner.TEASER_MS
+    undated = [planner.Segment(**{**s.__dict__, 'filmed_ms': None}) for s in segments]
+    compilation = long_planner.heuristic_long({**request, 'style': 'gaming'}, undated, set())
+    assert compilation['structure'] == 'compilation' and compilation['chapters'][0]['title'] == 'Party', 'strongest theme first'
+    raw = {'title': 'Vacances', 'structure': 'story', 'intro_text': 'Nos vacances', 'outro_text': 'À bientôt', 'description': 'Une semaine.',
+           'teaser': [{'id': 's4', 'start_ms': 0, 'end_ms': 60000}],
+           'chapters': [{'title': 'Arrivée', 'segments': [{'id': 's3', 'start_ms': 0, 'end_ms': 60000}, {'id': 'zz', 'start_ms': 0, 'end_ms': 1}]},
+                        {'title': 'Plage', 'segments': [{'id': 's2', 'start_ms': 60000, 'end_ms': 120000}, {'id': 's1', 'start_ms': 0, 'end_ms': 60000}, {'id': 's3', 'start_ms': 0, 'end_ms': 1000}]},
+                        {'title': '', 'segments': []}]}
+    video = long_planner.repair_long(raw, request, segments, set(), set())
+    assert video['teaser'][0]['end_ms'] == 8000, 'a teaser is a few seconds'
+    assert [c['title'] for c in video['chapters']] == ['Arrivée', 'Plage'], 'empty chapters dropped'
+    assert [p['id'] for p in video['chapters'][1]['segments']][:2] == ['s1', 's2'], 'a story chapter plays in filming order; ids used once'
+    assert 216000 <= sum(p['end_ms'] - p['start_ms'] for c in video['chapters'] for p in c['segments']) <= 264000, 'brought to the target length'
+
+
+def test_long_video_is_assembled_with_chapters_and_exports(tmp_path, monkeypatch):
+    ffmpeg_ready()
+    monkeypatch.setattr(get_settings(), 'openrouter_api_key', None)
+    lib = tmp_path / 'Bibliothèque longue'
+    root = lib / '_rushes'
+    (root / 'media').mkdir(parents=True)
+    later, earlier = 'e' * 32, 'f' * 32
+    make_dated(root / 'media' / f'{later}.mp4', ['testsrc2', 'smptebars'], '2026-07-02T10:00:00Z', silent=(4, 8))
+    make_dated(root / 'media' / f'{earlier}.mp4', ['rgbtestsrc', 'pal75bars'], '2026-07-01T09:00:00Z')
+    (root / 'library.json').write_text(json.dumps({'version': 1, 'rushes': [{'id': later, 'name': 'Jour 2.mp4', 'status': 'ready'},
+                                                                            {'id': earlier, 'name': 'Jour 1.mp4', 'status': 'ready'}]}), encoding='utf8')
+    for rush_id in (later, earlier):
+        asyncio.run(analysis.analyze_rush(root, rush_id))
+    assert analysis.load_analysis(root, earlier)['info']['created'] == '2026-07-01T09:00:00Z'
+    run = lib / '11111111-2222-4333-8444-777777777777'
+    run.mkdir()
+    request = {'mode': 'long', 'count': 1, 'duration_s': 60, 'aspect': '16:9', 'style': 'vlog', 'instruction': ''}
+    summary = asyncio.run(assemble.generate(root, run, request))
+    assert summary['mode'] == 'long' and summary['planner'] == 'heuristic'
+    assert any('shorter than asked' in n for n in summary['notes']), summary['notes']
+    plan = json.loads((run / 'montage-plan.json').read_text(encoding='utf8'))['plan'][0]
+    assert plan['structure'] == 'story'
+    order = [p['rush_id'] for c in plan['chapters'] for p in c['segments']]
+    assert order.index(earlier) < order.index(later) and order[-1] == later, 'day 1 before day 2'
+    silent = [p for c in plan['chapters'] for p in c['segments'] if p['rush_id'] == later and p['start_ms'] < 8000 and p['end_ms'] > 4000]
+    assert all(p['end_ms'] <= 4400 or p['start_ms'] >= 7600 for p in silent), f'the 4 s silence is cut: {silent}'
+    project = json.loads((run / 'editor-project.json').read_text(encoding='utf8'))
+    c = project['candidates'][0]
+    marks = summary['chapters'][0]['chapters']
+    assert marks[0] == {'title': 'Intro', 'start_ms': 0} and len(marks) == len(c['ranges']) >= 3
+    assert all(b == c['ranges'][i + 1][0] for i, (a, b) in enumerate(c['ranges'][:-1])), 'chapters play back to back'
+    titles = [o['text'] for o in c.get('text_overlays', [])]
+    assert len(titles) == len(marks) - 1, 'a lower-third title for each chapter after the intro'
+    total = sum(b - a for a, b in c['ranges'])
+    # 24 s of footage, minus the 4 s silence (a short breath stays), plus a 4.5 s teaser.
+    assert total == summary['chapters'][0]['duration_ms'] and 23000 <= total <= 27000, total
+    c['status'] = 'ready'
+    (run / 'editor-project.json').write_text(json.dumps(project), encoding='utf8')
+    asyncio.run(run_editor({'run': str(run), 'library': str(lib), 'revision': 0, 'candidate_id': c['id'], 'action': 'export'}))
+    clip = json.loads((run / 'job_output.json').read_text(encoding='utf8'))['clips'][0]
+    info = probe(clip['s3_url'])
+    durations = {s['codec_type']: float(s['duration']) for s in info['streams']}
+    video = next(s for s in info['streams'] if s['codec_type'] == 'video')
+    assert (video['width'], video['height']) == (1920, 1080) and abs(durations['video'] - total / 1000) < .1 and abs(durations['audio'] - durations['video']) < .08
+
+
+def test_long_videos_even_out_the_sound_of_each_rush():
+    analyses = [('a' * 32, 'loud', {'info': {'has_audio': True}, 'segments': [{'energy': -12}, {'energy': -14}, {'energy': -80}]}),
+                ('b' * 32, 'quiet', {'info': {'has_audio': True}, 'segments': [{'energy': -34}, {'energy': -30}]}),
+                ('c' * 32, 'normal', {'info': {'has_audio': True}, 'segments': [{'energy': -20}]}),
+                ('d' * 32, 'mute', {'info': {'has_audio': False}, 'segments': [{'energy': -90}]})]
+    levels = assemble.rush_levels(analyses)
+    assert levels == {'a' * 32: -12, 'b' * 32: -30, 'c' * 32: -20}, 'median of the audible moments; silent rushes are left alone'
+    assert assemble.level_gains(['a' * 32, 'b' * 32, 'c' * 32, 'd' * 32], levels) == {'a' * 32: -8.0, 'b' * 32: 10.0}
+    assert assemble.level_gains(['a' * 32, 'd' * 32], levels) == {}, 'nothing to match with a single rush'
+
+
+def test_long_plan_uses_the_model_answer_and_falls_back(monkeypatch):
+    from types import SimpleNamespace
+    def fake_analysis(rush, created):
+        return {'info': {'duration_ms': 60000, 'created': created}, 'hashes': {'step_ms': 2000, 'values': []}, 'energy': {'step_ms': 250, 'db': [-20] * 240},
+                'transcript': [], 'duplicate_of': None,
+                'segments': [{'id': f'{rush}-{i}', 'start_ms': i * 10000, 'end_ms': (i + 1) * 10000, 'score': .5 + i / 20, 'text': '', 'tags': [rush]} for i in range(6)]}
+    analyses = [('a' * 32, 'A.mp4', fake_analysis('a', None)), ('b' * 32, 'B.mp4', fake_analysis('b', None))]
+    request = planner.validate_request({'mode': 'long', 'count': 1, 'duration_s': 60, 'aspect': '16:9', 'style': 'compilation', 'cut_silences': False})
+    seen = {}
+
+    async def fake(settings, req, lines, hint):
+        seen['hint'], seen['lines'] = hint, len(lines)
+        return {'videos': [{'title': 'Best of', 'structure': 'compilation', 'intro_text': 'Le meilleur', 'outro_text': 'Merci', 'description': 'Les temps forts.',
+                            'teaser': [{'id': 'b-5', 'start_ms': 50000, 'end_ms': 54000}],
+                            'chapters': [{'title': 'B', 'segments': [{'id': 'b-5', 'start_ms': 50000, 'end_ms': 60000}, {'id': 'b-4', 'start_ms': 40000, 'end_ms': 50000}]},
+                                         {'title': 'A', 'segments': [{'id': 'a-5', 'start_ms': 50000, 'end_ms': 60000}]}]}], 'notes': 'ok', 'cost_usd': .05}
+    monkeypatch.setattr(long_planner, 'llm_long', fake)
+    result = asyncio.run(planner.plan(SimpleNamespace(openrouter_api_key='sk'), request, analyses))
+    video = result['videos'][0]
+    assert result['planner'] == 'ai' and 'thematic compilation' in seen['hint'] and seen['lines'] == 12
+    assert [c['title'] for c in video['chapters']] == ['B', 'A'] and video['intro_text'] == 'Le meilleur' and video['teaser'][0]['id'] == 'b-5'
+    assert 54000 <= sum(p['end_ms'] - p['start_ms'] for c in video['chapters'] for p in c['segments']) <= 66000, 'topped up to about a minute'
+    assert video['segments'][0] == video['teaser'][0], 'the flat list starts with the teaser'
+
+    async def broken(*args):
+        raise TimeoutError()
+    monkeypatch.setattr(long_planner, 'llm_long', broken)
+    result = asyncio.run(planner.plan(SimpleNamespace(openrouter_api_key='sk'), request, analyses))
+    assert result['planner'] == 'heuristic' and 'TimeoutError' in result['notes'][0] and result['videos'][0]['chapters']

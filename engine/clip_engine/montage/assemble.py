@@ -63,7 +63,26 @@ def piece_filter(src_w: int, src_h: int, w: int, h: int) -> str:
             f'[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,tpad=stop_mode=clone:stop_duration=1,format=yuv420p[v]')
 
 
-async def render_piece(renderer, rush: Path, info: dict, start_ms: int, end_ms: int, canvas, out: Path) -> int:
+def rush_levels(analyses) -> dict[str, float]:
+    """Each rush's typical sound level (median dB of its audible moments), to even out long videos made of many rushes."""
+    levels = {}
+    for rush_id, _, analysis in analyses:
+        audible = sorted(s['energy'] for s in analysis.get('segments', []) if isinstance(s.get('energy'), (int, float)) and s['energy'] > -60)
+        if audible and analysis.get('info', {}).get('has_audio', True):
+            levels[rush_id] = audible[len(audible) // 2]
+    return levels
+
+
+def level_gains(rush_ids, levels: dict[str, float]) -> dict[str, float]:
+    """Gain in dB per rush toward the median level of the rushes in one video (at most ±10 dB; the export normalizes the whole)."""
+    known = sorted(levels[r] for r in set(rush_ids) if r in levels)
+    if len(known) < 2:
+        return {}
+    target = known[len(known) // 2]
+    return {r: round(max(-10.0, min(10.0, target - levels[r])), 1) for r in set(rush_ids) if r in levels and abs(target - levels[r]) >= 1.5}
+
+
+async def render_piece(renderer, rush: Path, info: dict, start_ms: int, end_ms: int, canvas, out: Path, fade_ms: int = 0, gain_db: float = 0) -> int:
     """Render [start, end) of a rush as an MKV piece (PCM audio, no encoder delay). Returns its exact length in ms."""
     w, h = canvas
     frames = max(1, round((end_ms - start_ms) * FPS / 1000))
@@ -73,7 +92,9 @@ async def render_piece(renderer, rush: Path, info: dict, start_ms: int, end_ms: 
         cmd += ['-f', 'lavfi', '-t', f'{seconds:.6f}', '-i', 'anullsrc=r=48000:cl=stereo']
     audio = '[0:a:0]' if info['has_audio'] else '[1:a:0]'
     graph = (piece_filter(info['width'], info['height'], w, h) +
-             f';{audio}aresample=48000:async=1:first_pts=0,aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,apad,atrim=end={seconds:.6f}[a]')
+             f';{audio}aresample=48000:async=1:first_pts=0,aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,apad,atrim=end={seconds:.6f}'
+             + (f',volume={gain_db:.1f}dB' + (',alimiter=limit=0.95:level=disabled:latency=1' if gain_db > 0 else '') if gain_db else '')
+             + (f',afade=t=in:d={fade_ms / 1000:.3f},afade=t=out:st={max(0, seconds - fade_ms / 1000):.6f}:d={fade_ms / 1000:.3f}' if fade_ms else '') + '[a]')
     cmd += ['-filter_complex', graph, '-map', '[v]', '-map', '[a]', '-frames:v', str(frames),
             *renderer._video_codec_args(w, h, str(FPS)), '-pix_fmt', 'yuv420p', '-r', str(FPS), '-c:a', 'pcm_s16le', str(out)]
     await asyncio.to_thread(run_media, cmd, timeout=30 * 60, check=True)
@@ -101,6 +122,27 @@ def source_time_after(ranges, output_ms: int) -> int:
             return round(a + left)
         left -= b - a
     return ranges[-1][1]
+
+
+def long_overlays(video: dict, ranges, titles, request) -> list[dict]:
+    """Opening title, chapter titles (lower third) and closing line for a long video; at most 20 texts."""
+    base = {'x': .5, 'font': 'Montserrat ExtraBold', 'color': '#FFFFFF', 'outline_color': '#000000', 'uppercase': False, 'animation': 'fade'}
+    out = []
+    if video.get('intro_text'):
+        a = ranges[0][0]
+        out.append({**base, 'text': video['intro_text'][:120], 'start_ms': a, 'end_ms': min(ranges[0][1], a + 3500) if ranges[0][1] - a >= 600 else a + 600,
+                    'y': .5, 'size': 96, 'outline': 6, 'background': None, 'background_opacity': .7, 'uppercase': True})
+    if request['chapters']:
+        for (a, b), title in zip(ranges, titles):
+            if title and title != 'Intro' and len(out) < 18 and b - a >= 1500:
+                out.append({**base, 'text': title[:120], 'start_ms': a, 'end_ms': min(b, a + 2800), 'y': .86, 'size': 54, 'outline': 0,
+                            'background': '#000000', 'background_opacity': .6})
+    if video.get('outro_text'):
+        a, b = ranges[-1]
+        out.append({**base, 'text': video['outro_text'][:120], 'start_ms': max(a, b - 3500), 'end_ms': b, 'y': .5, 'size': 72, 'outline': 5,
+                    'background': None, 'background_opacity': .7})
+    # Overlays must not overlap the previous one's interval order requirements: keep them sorted.
+    return sorted(out, key=lambda o: o['start_ms'])[:20]
 
 
 def zoom_crop(crop, factor):
@@ -205,7 +247,7 @@ async def generate(root: Path, run: Path, request: dict, music_input: str | None
                 music['tempo'] = tempo
             except Exception:
                 plan['notes'].append('Could not find the beat of the music; cuts are not aligned to it.')
-        if music['beats']:
+        if music['beats'] and request['mode'] == 'short':
             for v in videos:
                 limits = [(p['start_ms'] + planning.MIN_PIECE_MS, infos[p['rush_id']]['duration_ms']) for p in v['segments']]
                 v['segments'] = snap_cuts(v['segments'], music['beats'], 0, limits)
@@ -217,11 +259,20 @@ async def generate(root: Path, run: Path, request: dict, music_input: str | None
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
     jobs = []
+    long = request['mode'] == 'long'
+    levels = rush_levels(analyses) if long else {}
     for vi, v in enumerate(videos):
-        for pi, p in enumerate(v['segments']):
+        # Short clips: every piece is its own cut, with handles to trim into. Long videos: pieces play back to back
+        # (silences already cut, a soft audio edge against clicks), and each chapter is one cut of the editor.
+        groups = ([(0, p) for p in v['teaser']] + [(ci + 1, p) for ci, c in enumerate(v['chapters']) for p in c['segments']]) if long \
+            else list(enumerate(v['segments']))
+        gains = level_gains([p['rush_id'] for _, p in groups], levels)
+        for pi, (group, p) in enumerate(groups):
             info = infos[p['rush_id']]
-            rush_start, rush_end = max(0, p['start_ms'] - HANDLE_MS), min(info['duration_ms'], p['end_ms'] + HANDLE_MS)
-            jobs.append({'video': vi, 'piece': p, 'rush_start': rush_start, 'rush_end': rush_end, 'file': work / f'v{vi:03d}_p{pi:02d}.mkv'})
+            handle = 0 if long else HANDLE_MS
+            rush_start, rush_end = max(0, p['start_ms'] - handle), min(info['duration_ms'], p['end_ms'] + handle)
+            jobs.append({'video': vi, 'group': group, 'piece': p, 'rush_start': rush_start, 'rush_end': rush_end,
+                         'fade_ms': 12 if long else 0, 'gain_db': gains.get(p['rush_id'], 0), 'file': work / f'v{vi:03d}_p{pi:04d}.mkv'})
     from clip_engine.montage.analyze import paths as rush_paths
     done = 0
     semaphore = asyncio.Semaphore(2)
@@ -231,7 +282,7 @@ async def generate(root: Path, run: Path, request: dict, music_input: str | None
         async with semaphore:
             info = infos[job['piece']['rush_id']]
             job['length'] = await render_piece(renderer, rush_paths(root, job['piece']['rush_id'])['media'], info,
-                                               job['rush_start'], job['rush_end'], canvas, job['file'])
+                                               job['rush_start'], job['rush_end'], canvas, job['file'], job['fade_ms'], job['gain_db'])
             done += 1
             report('pieces', 12 + 58 * done / len(jobs))
     await asyncio.gather(*(render(j) for j in jobs))
@@ -263,10 +314,24 @@ async def generate(root: Path, run: Path, request: dict, music_input: str | None
 
     style = STYLE_SETTINGS[request['style']]
     candidates = []
+    chapters = []
     for vi, v in enumerate(videos):
         pieces = [j for j in jobs if j['video'] == vi]
-        ranges = [[round(j['core'][0]), round(j['core'][1])] for j in pieces if j['core'][1] - j['core'][0] >= 100]
+        ranges, titles = [], []
+        for group in dict.fromkeys(j['group'] for j in pieces):
+            members = [j for j in pieces if j['group'] == group]
+            a, b = round(members[0]['core'][0]), round(members[-1]['core'][1])
+            if b - a >= 100:
+                ranges.append([a, b])
+                titles.append('Intro' if long and group == 0 else v['chapters'][group - 1]['title'] if long else None)
         span = (ranges[0][0], ranges[-1][1])
+        if long:
+            clock, marks = 0, []
+            for (a, b), title in zip(ranges, titles):
+                marks.append({'title': title, 'start_ms': clock})
+                clock += b - a
+            chapters.append({'video': vi, 'title': v['title'], 'description': v.get('description', ''), 'structure': v['structure'], 'chapters': marks,
+                             'duration_ms': clock})
         report('framing', 85 + 13 * vi / len(videos))
         scenes = await framing(source, span, canvas, request['aspect'], request['smart_framing'], style.get('framing', 'face'))
         if style.get('punch_in'):
@@ -285,7 +350,11 @@ async def generate(root: Path, run: Path, request: dict, music_input: str | None
             'reason': ' '.join(plan['notes'])[:4000], 'requires_visual_context': False, 'review': None, 'exports': [], 'title_card': False}
         if any(effects[k] for k in ('fade_in_ms', 'fade_out_ms', 'looks')) or effects['transition'] != 'none':
             candidate['effects'] = effects
-        if request['hook'] and v['hook_text']:
+        if long:
+            overlays = long_overlays(v, ranges, titles, request)
+            if overlays:
+                candidate['text_overlays'] = overlays
+        elif request['hook'] and v['hook_text']:
             candidate['text_overlays'] = [{'text': v['hook_text'][:120], 'start_ms': span[0], 'end_ms': max(span[0] + 100, source_time_after(ranges, HOOK_MS)),
                 'x': .5, 'y': .18, 'size': 84, 'font': 'Montserrat Black', 'color': '#111111', 'outline_color': '#000000', 'outline': 0,
                 'background': '#FFE234', 'background_opacity': 1, 'uppercase': True, 'animation': 'pop'}]
@@ -297,10 +366,10 @@ async def generate(root: Path, run: Path, request: dict, music_input: str | None
 
     report('save', 98)
     rows = [transcript_row(r['start_time_ms'], r['end_time_ms'], r['text'], [(w['start_time_ms'], w['end_time_ms']) for w in r['words']], duration) for r in transcript]
-    title = videos[0]['title'] if len(videos) == 1 else f'Auto montage: {len(videos)} clips'
+    title = videos[0]['title'] if len(videos) == 1 else f'Auto montage: {len(videos)} {"videos" if long else "clips"}'
     project = {'version': 1, 'revision': 0, 'title': title[:1024], 'width': canvas[0], 'height': canvas[1], 'duration_ms': duration,
                'aspect_ratio': request['aspect'], 'candidates': candidates, 'transcript': rows, 'frame_preview': True}
-    summary = {'planner': plan['planner'], 'notes': plan['notes'], 'videos': len(candidates), 'rushes': len({p['rush_id'] for v in videos for p in v['segments']}),
+    summary = {'chapters': chapters, 'mode': request['mode'], 'planner': plan['planner'], 'notes': plan['notes'], 'videos': len(candidates), 'rushes': len({p['rush_id'] for v in videos for p in v['segments']}),
                'segments_considered': plan['segments_considered'], 'cost_usd': plan.get('cost_usd'), 'canvas': list(canvas),
                'tempo': music.get('tempo') if music else None, 'seconds': round(time.monotonic() - began, 1)}
     atomic_json(run / 'montage-plan.json', {**summary, 'request': request, 'plan': videos})

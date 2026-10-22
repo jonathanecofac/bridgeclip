@@ -18,6 +18,8 @@ MAX_SEGMENTS_PER_VIDEO = 24
 MIN_PIECE_MS = 800
 CATALOG_LIMIT = 260
 MAX_OVERLAP = .5
+MAX_LONG_VIDEOS = 5
+STRUCTURES = ('auto', 'story', 'compilation')
 
 PLAN_SCHEMA = {'type': 'object', 'properties': {
     'videos': {'type': 'array', 'items': {'type': 'object', 'properties': {
@@ -41,16 +43,22 @@ def validate_request(value) -> dict:
     r = value
     instruction = r.get('instruction', '')
     duration = r.get('duration_s')
+    mode = r.get('mode', 'short')
+    long = mode == 'long'
     checks = (isinstance(instruction, str) and len(instruction) <= 2000 and not any(ord(c) < 32 and c not in '\n\t' for c in instruction)
-              and r.get('mode', 'short') == 'short'
-              and type(r.get('count')) is int and 1 <= r['count'] <= MAX_VIDEOS
-              and (duration is None or (type(duration) is int and 5 <= duration <= 180))
+              and mode in ('short', 'long')
+              and type(r.get('count')) is int and 1 <= r['count'] <= (MAX_LONG_VIDEOS if long else MAX_VIDEOS)
+              and (duration is None or (type(duration) is int and (60 <= duration <= 3600 if long else 5 <= duration <= 180)))
+              and r.get('structure', 'auto') in STRUCTURES
+              and all(type(r.get(k, True)) is bool for k in ('chapters', 'intro_outro', 'cut_silences'))
               and r.get('aspect') in ('9:16', '16:9') and r.get('style') in STYLES
               and isinstance(r.get('rush_ids', []), list) and all(isinstance(x, str) and re.fullmatch(r'[a-f0-9]{32}', x) for x in r.get('rush_ids', []))
               and all(type(r.get(k, True)) is bool for k in ('captions', 'smart_framing', 'hook', 'auto_export', 'beat_sync')))
     if not checks:
         raise PlanError('invalid_edit', 'Invalid montage request')
-    return {'mode': 'short', 'instruction': instruction.strip(), 'count': r['count'], 'duration_s': duration, 'aspect': r['aspect'],
+    return {'mode': mode, 'instruction': instruction.strip(), 'count': r['count'], 'duration_s': duration, 'aspect': r['aspect'],
+            'structure': r.get('structure', 'auto'), 'chapters': r.get('chapters', True), 'intro_outro': r.get('intro_outro', True),
+            'cut_silences': r.get('cut_silences', True),
             'style': r['style'], 'rush_ids': list(dict.fromkeys(r.get('rush_ids', []))), 'captions': r.get('captions', True),
             'smart_framing': r.get('smart_framing', True), 'hook': r.get('hook', True), 'auto_export': r.get('auto_export', False),
             'beat_sync': r.get('beat_sync', True), 'music': r.get('music') if isinstance(r.get('music'), str) else None}
@@ -71,6 +79,10 @@ class Segment:
     action: int = 0
     interest: int = 0
     speech: float = 0
+    # When it was filmed (epoch ms of the segment start), when the rush records it.
+    filmed_ms: int | None = None
+    # Frame hashes over the segment, to spot repeated footage.
+    hashes: list = field(default_factory=list)
 
     @property
     def duration(self):
@@ -79,14 +91,24 @@ class Segment:
 
 def catalog(analyses: list[tuple[str, str, dict]]) -> list[Segment]:
     """Segments of the usable rushes: (rush_id, display name, analysis); duplicates of another rush are left out."""
+    from datetime import datetime
     out = []
     for rush_id, name, analysis in analyses:
         if analysis.get('duplicate_of'):
             continue
+        created = analysis['info'].get('created')
+        try:
+            filmed = datetime.fromisoformat(created.replace('Z', '+00:00')).timestamp() * 1000 if created else None
+        except ValueError:
+            filmed = None
+        hashes = analysis.get('hashes', {}).get('values', [])
+        step = analysis.get('hashes', {}).get('step_ms', 2000) or 2000
         for s in analysis['segments']:
             if s['end_ms'] - s['start_ms'] >= MIN_PIECE_MS:
                 out.append(Segment(s['id'], rush_id, name, s['start_ms'], s['end_ms'], s['score'], s.get('text', ''), s.get('tags', []),
-                                   s.get('description', ''), s.get('loud', 0), s.get('action', 0), s.get('interest', 0), s.get('speech', 0)))
+                                   s.get('description', ''), s.get('loud', 0), s.get('action', 0), s.get('interest', 0), s.get('speech', 0),
+                                   None if filmed is None else round(filmed + s['start_ms']),
+                                   hashes[s['start_ms'] // step: max(s['start_ms'] // step + 1, s['end_ms'] // step)]))
     return out
 
 
@@ -258,6 +280,9 @@ def repair(answer: dict, request, segments: list[Segment]) -> list[dict]:
 
 async def plan(settings, request, analyses) -> dict:
     """The montage plan: {'videos': [...], 'planner': 'ai'|'heuristic', 'notes': [...]}."""
+    if request['mode'] == 'long':
+        from clip_engine.montage.long_planner import plan_long
+        return await plan_long(settings, request, analyses)
     segments = catalog(analyses)
     if not segments:
         raise PlanError('invalid_edit', 'No analyzed rushes to edit')

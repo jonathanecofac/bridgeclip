@@ -76,7 +76,25 @@ def probe(path) -> dict:
     num, _, den = str(video.get('avg_frame_rate') or '0/1').partition('/')
     fps = float(num) / float(den or 1) if float(den or 1) else 0
     return {'duration_ms': round(duration), 'width': width, 'height': height, 'fps': round(fps, 3) if math.isfinite(fps) else 0,
-            'has_audio': any(s.get('codec_type') == 'audio' for s in data['streams'])}
+            'has_audio': any(s.get('codec_type') == 'audio' for s in data['streams']),
+            'created': creation_time(data['format'].get('tags') or {}, video.get('tags') or {})}
+
+
+def creation_time(*tag_sets) -> str | None:
+    """When the camera recorded the rush (container or stream `creation_time`), as ISO UTC; None when absent or implausible."""
+    from datetime import datetime, timezone
+    for tags in tag_sets:
+        value = next((v for k, v in tags.items() if k.lower() in ('creation_time', 'com.apple.quicktime.creationdate', 'date')), None)
+        if not isinstance(value, str):
+            continue
+        try:
+            when = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+        if 1990 <= when.year <= 2100 and when.year != 1970:
+            return when.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+    return None
 
 
 def scene_cuts(path, duration_ms: int) -> list[int]:

@@ -4,7 +4,7 @@ import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { basename, dirname, extname, join } from 'path'
 import {
-  MAX_RUSHES, MUSIC_EXTENSIONS, RUSH_EXTENSIONS, parseMontageRequest,
+  MAX_RUSHES, MUSIC_EXTENSIONS, RUSH_EXTENSIONS, parseMontageRequest, youtubeDescription,
   type MontageJob, type MontageRequest, type MontageState, type MontageTemplate, type Rush, type RushSummary
 } from '../shared/montage'
 
@@ -240,6 +240,12 @@ export class MontageService {
     Object.assign(job, { status: 'queued', error: undefined, progress: undefined, summary: undefined, runDir: join(this.deps.libraryDir(), randomUUID()) })
     this.persist(); this.pump()
     return this.state()
+  }
+  /** A long video's description and chapter list, for the clipboard. */
+  chaptersText(id: unknown, video: unknown): string {
+    const found = this.jobs.find((j) => j.id === id)?.summary?.chapters?.find((v) => v.video === video)
+    if (!found) throw new Error('This video has no chapters.')
+    return youtubeDescription(found)
   }
   dismissJob(id: unknown): MontageState {
     const job = this.jobs.find((j) => j.id === id)

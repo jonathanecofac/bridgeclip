@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import { dirname, join } from 'path'
-import { app, dialog, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
+import { app, clipboard, dialog, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import { MontageService } from './montage'
 import { getBridgeRunnerPath } from './pipeline-runner'
 import { loadSettings } from './settings-store'
@@ -105,6 +105,7 @@ export function initMontage(getWindow: () => BrowserWindow | null, handle: (chan
   handle('montage:cancel', (_e, id) => s.cancelJob(id))
   handle('montage:retry', (_e, id) => s.retryJob(id))
   handle('montage:dismiss', (_e, id) => s.dismissJob(id))
+  handle('montage:copyChapters', (_e, id, video) => { clipboard.writeText(s.chaptersText(id, video)) })
   handle('montage:export', (_e, id) => s.exportJob(id))
   handle('montage:saveTemplate', (_e, name, request) => s.saveTemplate(name, request))
   handle('montage:deleteTemplate', (_e, id) => s.deleteTemplate(id))

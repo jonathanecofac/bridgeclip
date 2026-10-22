@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { loadMain, tempDir } = require('../zernio/support/load-main.cjs')
 
-const { MontageService, parseMontageRequest, DEFAULT_MONTAGE_REQUEST } = loadMain("export * from './src/main/montage'; export * from './src/shared/montage'")
+const { MontageService, parseMontageRequest, DEFAULT_MONTAGE_REQUEST, DEFAULT_LONG_REQUEST, youtubeChapters, chapterTime } = loadMain("export * from './src/main/montage'; export * from './src/shared/montage'")
 const until = async (check, ms = 5000) => {
   const end = Date.now() + ms
   while (!check()) { if (Date.now() > end) throw new Error('Timed out'); await new Promise((r) => setTimeout(r, 10)) }
@@ -41,9 +41,35 @@ function harness(dir, behaviour = {}) {
 
 test('requests are validated like the engine', () => {
   assert.deepEqual(parseMontageRequest({ count: 2, rush_ids: ['a'.repeat(32), 'a'.repeat(32)] }).rush_ids, ['a'.repeat(32)])
-  for (const bad of [{ count: 0 }, { count: 51 }, { style: 'wild' }, { aspect: '1:1' }, { duration_s: 3 }, { mode: 'long' }, { rush_ids: ['../x'] },
-    { instruction: 'a\u0000b' }, { captions: 'yes' }, null]) assert.throws(() => parseMontageRequest(bad), /Invalid montage settings/)
+  for (const bad of [{ count: 0 }, { count: 51 }, { style: 'wild' }, { aspect: '1:1' }, { duration_s: 3 }, { rush_ids: ['../x'] },
+    { instruction: 'a\u0000b' }, { captions: 'yes' }, { mode: 'medium' }, { mode: 'long', count: 6 }, { mode: 'long', duration_s: 30 }, { structure: 'novel' }, null]) assert.throws(() => parseMontageRequest(bad), /Invalid montage settings/)
   assert.equal(parseMontageRequest({ duration_s: null }).duration_s, null, 'free length')
+  const long = parseMontageRequest({ ...DEFAULT_MONTAGE_REQUEST, ...DEFAULT_LONG_REQUEST, duration_s: 1800, structure: 'story' })
+  assert.deepEqual([long.mode, long.count, long.duration_s, long.aspect, long.structure], ['long', 1, 1800, '16:9', 'story'])
+  assert.equal(chapterTime(3903000), '1:05:03'); assert.equal(chapterTime(247900), '4:07')
+  assert.equal(youtubeChapters([{ title: 'Intro', start_ms: 0 }, { title: 'La plage', start_ms: 75000 }]), '0:00 Intro\n1:15 La plage')
+})
+
+test('a long montage gives its description and chapters for YouTube', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-montage-')
+  try {
+    const h = harness(dir)
+    const worker = h.deps.runWorker
+    h.deps.runWorker = async (config, ...rest) => {
+      const result = await worker(config, ...rest)
+      return config.action === 'generate' ? { ...result, mode: 'long', chapters: [{ video: 0, title: 'Vacances', description: 'Une semaine à la mer.', structure: 'story', duration_ms: 600000,
+        chapters: [{ title: 'Intro', start_ms: 0 }, { title: 'Arrivée', start_ms: 4500 }, { title: 'La plage', start_ms: 125000 }] }] } : result
+    }
+    const service = new MontageService(h.deps)
+    service.start()
+    service.importRushes([h.video('a.mp4', '1')])
+    await until(() => service.state().rushes[0]?.status === 'ready')
+    service.createJob({ ...DEFAULT_MONTAGE_REQUEST, ...DEFAULT_LONG_REQUEST })
+    await until(() => service.state().jobs[0].status === 'done')
+    const job = service.state().jobs[0]
+    assert.equal(service.chaptersText(job.id, 0), 'Une semaine à la mer.\n\n0:00 Intro\n0:04 Arrivée\n2:05 La plage')
+    assert.throws(() => service.chaptersText(job.id, 1), /no chapters/)
+  } finally { cleanup() }
 })
 
 test('rushes are copied once, analyzed in the background, and duplicates or failures are shown', async () => {

@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-22
+
+### Added
+
+- **Long videos** in Auto Montage: choose **Long video** to make 1 to 5 videos of 3, 5, 10, 15, 20 or 30 minutes (or any length up to an hour) from your rushes, in 16:9 or 9:16.
+- **Structure**: a **Story** follows the filming order with an introduction, a development and a conclusion, and is only made when the rushes really follow on; a **Compilation** groups the moments by theme, best first. **Decide for me** picks the right one and says so.
+- Long videos are split into chapters with their titles on screen, open with a short teaser and title and end with a closing line when the content allows. Silences and dead time are cut, repeated moments (the same line said twice, the same shot filmed again) are left out, and the sound is evened out across rushes.
+- Each long video's chapter list is shown in the montage queue: **Copy for YouTube** copies its description and chapter times ready to paste.
+
 ## [0.5.0] - 2026-10-22
 
 ### Added
@@ -149,7 +158,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.5.0
 [0.4.1]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.0

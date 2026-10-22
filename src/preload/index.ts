@@ -154,6 +154,8 @@ export interface BridgeClipAPI {
     cancel: (id: string) => Promise<MontageState>
     retry: (id: string) => Promise<MontageState>
     dismiss: (id: string) => Promise<MontageState>
+    /** Copy a long video's description and chapter list to the clipboard. */
+    copyChapters: (id: string, video: number) => Promise<void>
     exportAll: (id: string) => Promise<MontageState>
     saveTemplate: (name: string, request: MontageRequest) => Promise<MontageState>
     deleteTemplate: (id: string) => Promise<MontageState>
@@ -381,6 +383,7 @@ const api: BridgeClipAPI = {
     cancel: (id) => ipcRenderer.invoke('montage:cancel', id),
     retry: (id) => ipcRenderer.invoke('montage:retry', id),
     dismiss: (id) => ipcRenderer.invoke('montage:dismiss', id),
+    copyChapters: (id, video) => ipcRenderer.invoke('montage:copyChapters', id, video),
     exportAll: (id) => ipcRenderer.invoke('montage:export', id),
     saveTemplate: (name, request) => ipcRenderer.invoke('montage:saveTemplate', name, request),
     deleteTemplate: (id) => ipcRenderer.invoke('montage:deleteTemplate', id),
