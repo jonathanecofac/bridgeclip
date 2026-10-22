@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { loadMain, tempDir } = require('../zernio/support/load-main.cjs')
 
-const { ChannelWatcher, parseChannelInput, parseChannelFeed, chooseNewVideos, DEFAULT_WATCH_SETTINGS } =
+const { ChannelWatcher, parseChannelInput, parseChannelFeed, parseUploads, chooseNewVideos, DEFAULT_WATCH_SETTINGS } =
   loadMain("export * from './src/main/watched-channels'; export * from './src/shared/watched-channels'")
 
 const CHANNEL = 'UC0123456789abcdefABCDEF'
@@ -184,5 +184,38 @@ test('a channel that stops answering keeps its videos and shows the error', asyn
     assert.match(state.channels[0].lastError, /YouTube did not answer/)
     assert.equal(state.channels[0].videos.length, 1)
     await assert.rejects(() => watcher.addChannel('UCzzzzzzzzzzzzzzzzzzzzzz'), /did not return this channel/)
+  } finally { cleanup() }
+})
+
+test('when YouTube’s feed is down, the channel’s uploads come from yt-dlp instead', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-watch-')
+  try {
+    const now = Date.parse('2026-10-20T12:00:00Z')
+    const listing = { channel: 'Domingo Replay', title: 'Domingo Replay - Videos', entries: [
+      { id: 'aaaaaaaaaaa', title: 'Épisode 12 & bonus', timestamp: now / 1000 - 3600 },
+      { id: 'bbbbbbbbbbb', title: 'Épisode 11', upload_date: '20261015' },
+      { id: 'not-an-id', title: 'ignored' }, { id: 'ccccccccccc', title: 'No date' }] }
+    const parsed = parseUploads(listing, now)
+    assert.equal(parsed.name, 'Domingo Replay')
+    assert.deepEqual(parsed.entries.map((e) => [e.videoId, e.title, e.publishedAt]), [
+      ['ccccccccccc', 'No date', '2026-10-20T11:59:57.000Z'], ['aaaaaaaaaaa', 'Épisode 12 & bonus', '2026-10-20T11:00:00.000Z'], ['bbbbbbbbbbb', 'Épisode 11', '2026-10-15T12:00:00.000Z']])
+    assert.throws(() => parseUploads({ title: 'x' }, now))
+
+    const h = harness(dir, { feeds: {} })
+    const logs = []
+    h.deps.log = (event, data) => logs.push([event, data])
+    let uploads = parsed
+    h.deps.listUploads = async (id) => { if (id !== CHANNEL) throw new Error('unknown'); return uploads }
+    const watcher = new ChannelWatcher(h.deps)
+    let state = await watcher.addChannel(CHANNEL)
+    assert.equal(state.channels[0].name, 'Domingo Replay')
+    assert.equal(state.channels[0].videos.length, 3)
+    assert.deepEqual(logs[0], ['watch.feed.fallback', { channel: CHANNEL, reason: '404' }])
+    h.advance(10 * 60_000)
+    uploads = { name: 'Domingo Replay', entries: [{ videoId: 'nnnnnnnnnnn', title: 'Épisode 13', publishedAt: '2026-10-20T12:05:00.000Z', short: false }, ...parsed.entries] }
+    state = await watcher.checkNow(state.channels[0].id)
+    assert.equal(state.channels[0].videos.find((v) => v.videoId === 'nnnnnnnnnnn').status, 'clipping')
+    h.deps.listUploads = async () => { throw new Error('yt-dlp failed') }
+    await assert.rejects(() => watcher.addChannel('UCzzzzzzzzzzzzzzzzzzzzzz'), /through its feed or yt-dlp/)
   } finally { cleanup() }
 })

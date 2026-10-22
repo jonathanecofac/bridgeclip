@@ -5,7 +5,7 @@ import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 import {
   DEFAULT_WATCH_SETTINGS, MAX_ACTIVITY, MAX_CHANNELS, MAX_INTERVAL_MINUTES, MAX_VIDEOS_PER_CHANNEL, MIN_INTERVAL_MINUTES,
   chooseNewVideos, feedUrl, parseChannelFeed, parseChannelInput, videoUrl,
-  type WatchActivity, type WatchBacklog, type WatchChannelUpdate, type WatchClipSettings, type WatchState, type WatchedChannel, type WatchedVideo
+  type FeedEntry, type WatchActivity, type WatchBacklog, type WatchChannelUpdate, type WatchClipSettings, type WatchState, type WatchedChannel, type WatchedVideo
 } from '../shared/watched-channels'
 
 /** Everything the watcher needs from the rest of the app; tests pass fakes. */
@@ -14,6 +14,8 @@ export interface WatchDeps {
   file: string
   /** GET a public YouTube URL as text (feeds); throws on failure. */
   fetchText: (url: string) => Promise<string>
+  /** The channel's latest uploads another way (yt-dlp), for when YouTube's feed is down or empty. */
+  listUploads?: (channelId: string) => Promise<{ name: string; entries: FeedEntry[] }>
   /** A channel page (@handle, /c/, /user/) to its channel id. */
   resolveChannelPage: (pageUrl: string) => Promise<{ channelId: string; name: string }>
   /** Length and live state of a video; nulls when unknown. */
@@ -125,7 +127,7 @@ export class ChannelWatcher {
     if (this.saved.channels.some((c) => c.channelId === channelId)) throw new Error('This channel is already watched.')
     // Reading the feed now proves the channel exists and records what it already has.
     let feed
-    try { feed = parseChannelFeed(await this.deps.fetchText(feedUrl(channelId))) } catch { throw new Error('YouTube did not return this channel’s videos. Check the link and try again.') }
+    try { feed = await this.readChannel(channelId) } catch { throw new Error('YouTube did not return this channel’s videos, through its feed or yt-dlp. Check the link, or try again in a few minutes.') }
     const now = this.deps.now()
     const channel: WatchedChannel = {
       id: randomUUID(), channelId, name: feed.name || name || channelId, enabled: true, addedAt: iso(now), settings: clipSettings,
@@ -187,6 +189,25 @@ export class ChannelWatcher {
 
   // ── Internals ──────────────────────────────────────────────────────────
 
+  /**
+   * A channel's newest uploads: YouTube's feed first, and the channel's Videos
+   * tab through yt-dlp when the feed fails or comes back empty (it has outages,
+   * answering 404 or 500 for hours).
+   */
+  private async readChannel(channelId: string): Promise<{ name: string; entries: FeedEntry[] }> {
+    let reason: string
+    try {
+      const feed = parseChannelFeed(await this.deps.fetchText(feedUrl(channelId)))
+      if (feed.entries.length || !this.deps.listUploads) return feed
+      reason = 'empty feed'
+    } catch (error) {
+      if (!this.deps.listUploads) throw error
+      reason = error instanceof Error ? error.message : 'feed failed'
+    }
+    this.deps.log('watch.feed.fallback', { channel: channelId, reason: reason.slice(0, 120) })
+    return this.deps.listUploads(channelId)
+  }
+
   private find(id: unknown): WatchedChannel {
     const channel = this.saved.channels.find((c) => c.id === id)
     if (!channel) throw new Error('This channel is no longer watched.')
@@ -222,7 +243,7 @@ export class ChannelWatcher {
     const now = this.deps.now()
     try {
       let feed
-      try { feed = parseChannelFeed(await this.deps.fetchText(feedUrl(channel.channelId))) } catch {
+      try { feed = await this.readChannel(channel.channelId) } catch {
         throw new Error('YouTube did not answer for this channel. BridgeClip will try again at the next check.')
       }
       if (feed.name) channel.name = feed.name

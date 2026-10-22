@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-22
+
+### Fixed
+
+- **Watched channels**: adding or checking a channel no longer fails when YouTube's channel feed is down (it answers 404 or 500 for hours at a time). BridgeClip retries, then reads the channel's latest videos with yt-dlp instead.
+
 ## [0.4.0] - 2026-10-20
 
 ### Added
@@ -134,7 +140,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.2.0

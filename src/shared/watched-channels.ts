@@ -143,6 +143,31 @@ export function parseChannelFeed(xml: string): { channelId: string | null; name:
 }
 
 /**
+ * A channel's Videos tab as yt-dlp lists it (`-J --flat-playlist`), in the
+ * feed's shape. Dates come from `timestamp` or `upload_date`; without either,
+ * the list order is kept, counting back from `now`.
+ */
+export function parseUploads(value: unknown, now: number): { name: string; entries: FeedEntry[] } {
+  const info = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  if (!Array.isArray(info.entries)) throw new Error('No channel uploads')
+  const text = (v: unknown): string => typeof v === 'string' ? clean(v.replace(/&/g, '&amp;')) : ''
+  const name = text(info.channel) || text(info.uploader) || text(info.title).replace(/ - (?:Videos|Vidéos)$/, '')
+  const entries: FeedEntry[] = []
+  info.entries.forEach((item: unknown, index: number) => {
+    const e = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+    if (typeof e.id !== 'string' || !/^[\w-]{11}$/.test(e.id)) return
+    let at = typeof e.timestamp === 'number' && Number.isFinite(e.timestamp) ? e.timestamp * 1000 : NaN
+    if (!Number.isFinite(at) && typeof e.upload_date === 'string' && /^\d{8}$/.test(e.upload_date)) {
+      at = Date.parse(`${e.upload_date.slice(0, 4)}-${e.upload_date.slice(4, 6)}-${e.upload_date.slice(6)}T12:00:00Z`)
+    }
+    if (!Number.isFinite(at)) at = now - index * 1000
+    entries.push({ videoId: e.id, title: text(e.title) || e.id, publishedAt: new Date(Math.min(at, now)).toISOString(), short: false })
+  })
+  entries.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
+  return { name, entries }
+}
+
+/**
  * Which new videos to clip. Videos posted while BridgeClip was watching (since
  * the last successful look, when looks were on time) are always taken. Older
  * ones, missed while it was closed or YouTube did not answer, follow the

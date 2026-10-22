@@ -10,7 +10,7 @@ import { validateJobConfig } from './validation'
 import { readResponseText } from './http-response'
 import { resolveBinary } from './tools'
 import { logger } from './logger'
-import { DEFAULT_WATCH_SETTINGS, type WatchClipSettings } from '../shared/watched-channels'
+import { DEFAULT_WATCH_SETTINGS, parseUploads, type FeedEntry, type WatchClipSettings } from '../shared/watched-channels'
 
 const execFileAsync = promisify(execFile)
 const YOUTUBE = 'https://www.youtube.com'
@@ -18,11 +18,29 @@ const YOUTUBE = 'https://www.youtube.com'
 const base = (): string => (!app.isPackaged && process.env.BRIDGECLIP_E2E_YOUTUBE_URL) || YOUTUBE
 const local = (url: string): string => url.startsWith(YOUTUBE) ? base() + url.slice(YOUTUBE.length) : url
 
+const BROWSER = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
 async function fetchText(url: string): Promise<string> {
-  const response = await fetch(local(url), { redirect: 'follow', signal: AbortSignal.timeout(15000),
-    headers: { 'Accept-Language': 'en-US,en;q=0.8', Cookie: 'SOCS=CAI', Accept: 'text/html,application/xml,application/atom+xml;q=0.9,*/*;q=0.5' } })
-  if (!response.ok) { await response.body?.cancel(); throw new Error(`YouTube answered ${response.status}`) }
-  return readResponseText(response, 4 * 1024 * 1024, 'YouTube response is too large')
+  let status = 0
+  // One quick retry: YouTube's feed answers 5xx in short bursts.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, 1500))
+    const response = await fetch(local(url), { redirect: 'follow', signal: AbortSignal.timeout(15000),
+      headers: { 'User-Agent': BROWSER, 'Accept-Language': 'en-US,en;q=0.8', Cookie: 'SOCS=CAI', Accept: 'text/html,application/xml,application/atom+xml;q=0.9,*/*;q=0.5' } })
+    if (response.ok) return readResponseText(response, 4 * 1024 * 1024, 'YouTube response is too large')
+    await response.body?.cancel()
+    status = response.status
+    if (status < 500) break
+  }
+  throw new Error(`YouTube answered ${status}`)
+}
+
+/** The newest uploads on a channel's Videos tab (no Shorts), through yt-dlp, with approximate dates. */
+async function listUploads(channelId: string): Promise<{ name: string; entries: FeedEntry[] }> {
+  const { stdout } = await execFileAsync(resolveBinary('yt-dlp'), [
+    '--ignore-config', '--skip-download', '--flat-playlist', '--playlist-end', '15', '--no-warnings', '--no-cache-dir',
+    '--socket-timeout', '15', '--extractor-args', 'youtubetab:approximate_date', '-J', '--', `${YOUTUBE}/channel/${channelId}/videos`
+  ], { timeout: 120000, maxBuffer: 16 * 1024 * 1024, windowsHide: true })
+  return parseUploads(JSON.parse(stdout), Date.now())
 }
 
 const SETTINGS_FIELDS = Object.keys(DEFAULT_WATCH_SETTINGS).concat('clipRequest', 'plannerModel', 'transcriptionModel') as (keyof WatchClipSettings)[]
@@ -74,7 +92,7 @@ let watcher: ChannelWatcher | null = null
 export function initWatchedChannels(getWindow: () => BrowserWindow | null, handle: (channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => void): void {
   watcher = new ChannelWatcher({
     file: join(app.getPath('userData'), 'watched-channels.json'),
-    fetchText, resolveChannelPage, videoDetails, validateSettings,
+    fetchText, listUploads, resolveChannelPage, videoDetails, validateSettings,
     startJob: async (request) => {
       const result = await startClipJobRequest(request)
       return 'error' in result ? result : { jobId: result.jobId, outputDir: result.job.outputDir }
