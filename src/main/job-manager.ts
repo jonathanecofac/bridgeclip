@@ -197,9 +197,15 @@ export function listJobs(): JobSnapshot[] {
   return [...jobs.values()].map((job) => job.snapshot).reverse()
 }
 
+const liveRunSources = new Set<() => Iterable<string>>()
+/** Other run producers (Auto Montage) report the run folders they are still writing. */
+export function registerLiveRuns(source: () => Iterable<string>): void { liveRunSources.add(source) }
+
 /** Queued and running job IDs, so run history can tell live runs from interrupted ones. */
 export function liveJobIds(): ReadonlySet<string> {
-  return new Set([...jobs.values()].filter((job) => isActiveJobStatus(job.snapshot.status)).map((job) => job.snapshot.id))
+  const live = new Set([...jobs.values()].filter((job) => isActiveJobStatus(job.snapshot.status)).map((job) => job.snapshot.id))
+  for (const source of liveRunSources) { try { for (const id of source()) live.add(id) } catch { /* A broken source never hides jobs. */ } }
+  return live
 }
 
 /** On quit, queued jobs will never start: record them as cancelled rather than interrupted. */

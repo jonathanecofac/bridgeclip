@@ -3,10 +3,11 @@ import type { LibraryClipTarget } from '../shared/library-posting'
 import type { AutomationReviewResult } from '../shared/automations'
 import type { CandidateEdit, EditorProgressSummary, EditorScene, EditorSession } from '../shared/clip-editor'
 import type { WatchChannelUpdate, WatchClipSettings, WatchState } from '../shared/watched-channels'
+import type { MontageRequest, MontageState } from '../shared/montage'
 import type { CaptionStyleOverrides, UserCaptionPreset } from '../shared/caption-style'
 import type { JobOutput } from '../shared/job-output'
 import type { EditAudit } from '../shared/editorial'
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   ZernioConnectOptions,
   ZernioConnectResult,
@@ -140,6 +141,25 @@ export interface BridgeClipAPI {
     operation: (path: string) => Promise<{ operation: EditorSession['operation']; progress?: EditorSession['progress'] }>
     /** The exported picture at a source time, rendered by the engine from the saved project. */
     previewFrame: (path: string, revision: number, id: string, atMs: number) => Promise<{ path: string }>
+  }
+  /** AI Video Editor — Auto Montage: rush library, analysis and montage jobs. */
+  montage: {
+    state: () => Promise<MontageState>
+    importPaths: (paths: string[]) => Promise<MontageState>
+    chooseRushes: () => Promise<MontageState>
+    chooseMusic: () => Promise<string | null>
+    removeRush: (id: string) => Promise<MontageState>
+    reanalyze: (id: string) => Promise<MontageState>
+    create: (request: MontageRequest, music?: string | null) => Promise<MontageState>
+    cancel: (id: string) => Promise<MontageState>
+    retry: (id: string) => Promise<MontageState>
+    dismiss: (id: string) => Promise<MontageState>
+    exportAll: (id: string) => Promise<MontageState>
+    saveTemplate: (name: string, request: MontageRequest) => Promise<MontageState>
+    deleteTemplate: (id: string) => Promise<MontageState>
+    onUpdate: (callback: (state: MontageState) => void) => () => void
+    /** The path of a file dropped on the window (drag and drop import). */
+    pathForFile: (file: File) => string
   }
   /** Watched YouTube channels: new uploads are clipped with each channel's settings. */
   watch: {
@@ -349,6 +369,23 @@ const api: BridgeClipAPI = {
     previewFrame: (path, revision, id, atMs) => ipcRenderer.invoke('editor:previewFrame', path, revision, id, atMs),
     importMusic: (path) => ipcRenderer.invoke('editor:importMusic', path),
     reframe: (path, revision, id, mode) => ipcRenderer.invoke('editor:reframe', path, revision, id, mode)
+  },
+  montage: {
+    state: () => ipcRenderer.invoke('montage:state'),
+    importPaths: (paths) => ipcRenderer.invoke('montage:import', paths),
+    chooseRushes: () => ipcRenderer.invoke('montage:chooseRushes'),
+    chooseMusic: () => ipcRenderer.invoke('montage:chooseMusic'),
+    removeRush: (id) => ipcRenderer.invoke('montage:removeRush', id),
+    reanalyze: (id) => ipcRenderer.invoke('montage:reanalyze', id),
+    create: (request, music) => ipcRenderer.invoke('montage:create', request, music ?? null),
+    cancel: (id) => ipcRenderer.invoke('montage:cancel', id),
+    retry: (id) => ipcRenderer.invoke('montage:retry', id),
+    dismiss: (id) => ipcRenderer.invoke('montage:dismiss', id),
+    exportAll: (id) => ipcRenderer.invoke('montage:export', id),
+    saveTemplate: (name, request) => ipcRenderer.invoke('montage:saveTemplate', name, request),
+    deleteTemplate: (id) => ipcRenderer.invoke('montage:deleteTemplate', id),
+    onUpdate: (callback) => subscribe('montage:update', callback),
+    pathForFile: (file) => webUtils.getPathForFile(file)
   },
   watch: {
     state: () => ipcRenderer.invoke('watch:state'),

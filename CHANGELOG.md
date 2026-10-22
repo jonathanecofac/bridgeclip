@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-22
+
+### Added
+
+- **AI Video Editor — Auto Montage** (Auto Montage in the sidebar): drop or import dozens or hundreds of rushes, in any order, length, resolution or format. Each one is copied into your Library folder and analyzed once: shots, sound level, dialogue (transcribed with word timing), AI vision descriptions of its keyframes, and near-duplicates (re-encoded copies are left out).
+- Describe what you want ("10 clips of 45 seconds with the best gaming moments"), pick the format (9:16 or 16:9), length (15 to 90 s or free), style (Viral TikTok, Gaming, Cinematic, Vlog, Podcast, Compilation, Minimal) and number of videos, then **Generate the montage**. The AI plans each video from the analyzed moments (a hook first, then the best moments, never inventing a story between unrelated shots, and making variants clearly different); FFmpeg cuts and assembles them. Without an OpenRouter key, moments are chosen from the analysis scores.
+- Each montage opens in the editor like any other project, with captions from the dialogue, a hook text, smart framing on people, the style's transitions, zooms and color, and optional music with cuts on the beat. Export every video at once, or automatically as soon as it is assembled. Save your settings as templates.
+- Several montages can run at once; unfinished analyses and montages start again when BridgeClip reopens.
+
 ## [0.4.1] - 2026-10-22
 
 ### Fixed
@@ -140,7 +149,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jonathanecofac/bridgeclip/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.5.0
 [0.4.1]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jonathanecofac/bridgeclip/releases/tag/v0.3.0

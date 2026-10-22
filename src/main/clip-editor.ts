@@ -183,18 +183,18 @@ export async function freeEditorMedia(path: unknown, revision: unknown): Promise
   logger.info('editor.mediaFreed')
   return openEditor(run)
 }
-function stop(child?: ChildProcess, force = false): void {
+export function stopWorker(child?: ChildProcess, force = false): void {
   if (!child?.pid) return
   try { if (process.platform === 'win32') execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeout: 5000, windowsHide: true }, () => {}); else process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM') } catch { /* Already exited. */ }
 }
-export function stopEditorsForQuit(): void { for (const op of operations.values()) { op.abort?.abort(); stop(op.child, true) } }
+export function stopEditorsForQuit(): void { for (const op of operations.values()) { op.abort?.abort(); stopWorker(op.child, true) } }
 export function cancelEditor(path: unknown): void {
   const operation = operations.get(runPath(path))
   if (operation) operation.cancelled = true
   operation?.abort?.abort()
   const child = operation?.child
-  stop(child)
-  if (child) { const timer = setTimeout(() => stop(child, true), 3000); timer.unref(); child.once('close', () => clearTimeout(timer)) }
+  stopWorker(child)
+  if (child) { const timer = setTimeout(() => stopWorker(child, true), 3000); timer.unref(); child.once('close', () => clearTimeout(timer)) }
 }
 export async function replaceEditorSource(path: unknown, revision: unknown, replacement: unknown): Promise<EditorSession> {
   assertAbsolutePath(replacement)
@@ -230,7 +230,7 @@ function runWorker(run: string, operation: EditorOperation, action: WorkerAction
     let result: { ok: boolean; error?: unknown } | undefined
     const consume = (line: string): void => {
       if (!line.trim()) return
-      if (line.length > 16384) { protocolFailed = true; stop(child); return }
+      if (line.length > 16384) { protocolFailed = true; stopWorker(child); return }
       try {
         const value = JSON.parse(line)
         if (value?.type === 'progress') {
@@ -246,13 +246,13 @@ function runWorker(run: string, operation: EditorOperation, action: WorkerAction
         else protocolFailed = true
       } catch { protocolFailed = true }
     }
-    const timer = setTimeout(() => { timedOut = true; stop(child, true) }, limitMs)
+    const timer = setTimeout(() => { timedOut = true; stopWorker(child, true) }, limitMs)
     const finish = (error?: Error): void => { if (settled) return; settled = true; clearTimeout(timer); if (error) reject(error); else resolve() }
     child.stdout.on('data', (chunk) => {
       stdout += String(chunk)
       let end: number
       while ((end = stdout.indexOf('\n')) >= 0) { consume(stdout.slice(0, end)); stdout = stdout.slice(end + 1) }
-      if (stdout.length > 16384) { protocolFailed = true; stdout = ''; stop(child) }
+      if (stdout.length > 16384) { protocolFailed = true; stdout = ''; stopWorker(child) }
     })
     // Keep a bounded tail for the log; it is redacted before it is written.
     child.stderr.on('data', (chunk) => { stderr = (stderr + String(chunk)).slice(-8192) })
@@ -272,7 +272,7 @@ function runWorker(run: string, operation: EditorOperation, action: WorkerAction
   })
 }
 
-function workerSetup(settings: ReturnType<typeof loadSettings>): { env: Record<string, string | undefined>; python: string } {
+export function workerSetup(settings: ReturnType<typeof loadSettings>): { env: Record<string, string | undefined>; python: string } {
   const engine = getEnginePath()
   const env: Record<string, string | undefined> = { ...runtimeEnvironment(), ...getSettingsForBridge({ ...settings, jevEnabled: 'on' }), PYTHONPATH: engine, PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
   const ffmpeg = resolveBinary('ffmpeg')

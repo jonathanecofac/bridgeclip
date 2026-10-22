@@ -10,6 +10,7 @@ import { AccountsPage } from './pages/AccountsPage'
 import { PostsPage } from './pages/PostsPage'
 import { AutomationsPage } from './pages/AutomationsPage'
 import { WatchedChannelsPage } from './pages/WatchedChannelsPage'
+import { AutoMontagePage } from './pages/AutoMontagePage'
 import { AssistantPage } from './pages/AssistantPage'
 import { BridgeClipLogo } from './components/brand/BridgeClipLogo'
 import { useSettingsStore } from './store/use-settings-store'
@@ -165,6 +166,7 @@ export default function App(): React.JSX.Element {
             {page === 'posts' && <PostsPage onNavigate={setPage} />}
             {page === 'automations' && <AutomationsPage onNavigate={setPage} onViewLibrary={viewLibraryRun} />}
             {page === 'watch' && <WatchedChannelsPage onNavigate={setPage} onViewLibrary={viewLibraryRun} />}
+            {page === 'montage' && <AutoMontagePage onNavigate={setPage} onViewLibrary={viewLibraryRun} />}
             {page === 'settings' && <SettingsPage showUpdates={showUpdates} />}
           </Fragment>
         </Layout>

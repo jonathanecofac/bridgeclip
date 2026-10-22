@@ -52,7 +52,7 @@ function ipcWithLibrary(library) {
     './zernio/service': {},
     './zernio/posts': {},
     './automations': {},
-    './clip-editor': {}, './caption-presets-store': {}, './watch-service': { initWatchedChannels() {} },
+    './clip-editor': {}, './caption-presets-store': {}, './watch-service': { initWatchedChannels() {} }, './montage-service': { initMontage() {} },
     './output-storage': {},
     './edit-inspector': {},
     './youtube-preview': {},

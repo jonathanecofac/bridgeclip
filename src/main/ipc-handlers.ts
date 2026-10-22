@@ -11,6 +11,7 @@ import { getEnginePath, getBridgeRunnerPath, resolvePythonPath, validatePython }
 import { cancelTrackedJob, dismissJob, initJobManager, listJobs, liveJobIds } from './job-manager'
 import { startClipJobRequest } from './job-start'
 import { initWatchedChannels } from './watch-service'
+import { initMontage } from './montage-service'
 import { logger, getLogFilePath } from './logger'
 import { assertAbsolutePath, assertMediaPath, assertTrustedSender, authorizeMedia, isTrustedExternalUrl, isWebUrl, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getModelCatalog } from './openrouter-models'
@@ -57,6 +58,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   })
   // Watched YouTube channels run in main, with or without a window.
   initWatchedChannels(getMainWindow, handle as (channel: string, listener: (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown) => void)
+  initMontage(getMainWindow, handle as (channel: string, listener: (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown) => void)
   handle('settings:load', () => {
     return publicSettings(loadSettings())
   })
